@@ -1,0 +1,65 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write   # 需要写权限才能创建 GitHub Release
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      # 1. 发布裸名版 dsh-lookout（让别人用短名装）
+      - name: Publish dsh-lookout
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      # 2. 临时把包名改成 @cowwo 的 scoped 版再发一次
+      - name: Publish @cowwo/dsh-lookout
+        run: |
+          npm pkg set name=@cowwo/dsh-lookout
+          npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      # 3. 自动创建 GitHub Release 版本页（写进安装命令）
+      - name: Create GitHub Release
+        run: |
+          cat > release-notes.md <<'EOF'
+          ## 安装
+
+          ```sh
+          dsh plugin --profile web add dsh-lookout
+          ```
+
+          也可用 scoped 名：`@cowwo/dsh-lookout`。
+
+          ## 功能
+
+          一个插件顶三个（合并了原 dsh-icon-custom / dsh-notify-p / dsh-session-info）：
+
+          - **图标与角标**：设置页上传 SVG / PNG / ICO 换浏览器标签页图标，立即生效并持久保存；
+            自动适配安卓 / iOS / 平板 PWA 图标；未读红点与进行中黄点显示在工作区数字、会话行、
+            左上角 Logo 和标签页图标上，数字可点开清单、点条目定位到侧栏；
+            安装为应用后未读数字还能显示为系统图标角标（Windows 任务栏 / macOS Dock）。
+          - **邮件通知**：会话干完活 / 出错 / 卡住 / 等你审批时发一封邮件，正文写清是哪个会话，
+            并附一条可点击直达该会话的链接。支持消抖合并、去重、限流、子代理跳过、
+            SMTP 服务商预设与发送测试。
+          - **会话 ID**：会话标题栏右侧显示当前会话完整 ID，可一键选中复制（剪贴板自动净化）。
+
+          ## 设置
+
+          设置 → 图标管理 / 邮件通知（两个独立页面）。
+          EOF
+          gh release create ${GITHUB_REF_NAME} --title "${GITHUB_REF_NAME}" --notes-file release-notes.md
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

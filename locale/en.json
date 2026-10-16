@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Lookout",
+    "description": "Watches every session — who finished, who errored, who is stuck, and who is waiting for your approval — and notifies you through the browser favicon badge, red/yellow dots, and email, while also showing the current session ID."
+  }
+}
