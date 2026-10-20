@@ -7300,6 +7300,833 @@ window.__ModuleLoader__.load({
   } finally {
     __loader.load = __origLoad;
   }
+
+  //#region file row menu
+  /**
+   * The file tree's "⋯" row menu: copy a row's absolute path, download a file.
+   *
+   * This region lives in the merge glue rather than inside one of the three
+   * bundled parts because those parts are byte-locked by
+   * test/merged-client.test.mjs (each must stay a byte-for-byte copy of its
+   * original bundle). It is still one self-contained unit: a single start/stop
+   * pair, no React for the menu itself, and nothing but DOM writes into the
+   * shipped file tree.
+   *
+   * Host contract (read-only reference: @deepseek-ai/dsh-client-ui-sidebar-files):
+   *   [data-files-body] li[data-files-entry="file"|"directory"][data-files-path]
+   *     > button.row
+   * The absolute path is ALWAYS read from data-files-path; it is never rebuilt
+   * from the row text. Rows of type "other" are left alone. The menu button is
+   * inserted as a SIBLING after that row button, never inside it: a nested
+   * button is invalid HTML and its click would bubble into "open this file".
+   *
+   * Every entry point is guarded. A selector that stops matching after a host
+   * upgrade can only cost these buttons, never the host's own rendering; three
+   * consecutive scans that place nothing at all stop the feature for the page.
+   */
+  const ROW_MENU_NS = "dsh-lookout";
+  /** Sibling button injected after the row button; its presence is the idempotency key. */
+  const ROW_MENU_ATTR = "data-lookout-rowmenu";
+  const ROW_MENU_POP_ATTR = "data-lookout-rowmenu-pop";
+  const ROW_MENU_TOAST_ATTR = "data-lookout-toast";
+  const ROW_MENU_STYLE_KEY = "lookout-row-menu";
+  const ROW_MENU_BODY_SELECTOR = "[data-files-body]";
+  const ROW_MENU_ROWS_SELECTOR = 'li[data-files-entry="file"],li[data-files-entry="directory"]';
+  const ROW_MENU_PATH_ATTR = "data-files-path";
+  /** A run that places nothing at all, this many times in a row, gives up. */
+  const ROW_MENU_MAX_FAILURES = 3;
+  const ROW_MENU_SCAN_DEBOUNCE = 200;
+  const ROW_MENU_QUIET_MS = 250;
+  const ROW_MENU_FEEDBACK_MS = 1500;
+  const ROW_MENU_TOAST_MS = 3000;
+  const ROW_MENU_BUTTON_PADDING = "32px";
+  const ROW_MENU_ENABLED_KEY = "dsh-lookout:file-row-menu:enabled";
+  const ROW_MENU_DISMISSED_KEY = "dsh-lookout:file-row-menu:gave-up-dismissed";
+
+  /** Menu copy, one namespace of its own so it cannot collide with the three parts. */
+  const ROW_MENU_ZH = {
+    nav: "文件行 ⋯ 菜单",
+    toggleLabel: "在文件树的每一行右侧显示「⋯」菜单",
+    toggleHint: "点开可以复制这一行的绝对路径，或下载单个文件；文件夹的下载暂不支持。这一项贴着宿主文件树绘制，宿主升级后可能失效，失效只是不显示，文件树本身不受影响。",
+    ariaLabel: "行操作",
+    copyPath: "复制路径",
+    download: "下载",
+    folderUnsupported: "文件夹暂不支持",
+    copyFailed: "复制失败，请手动选择路径",
+    err401: "登录已过期，请刷新页面重新登录",
+    err413: "文件超过 20MB，暂不支持下载",
+    err404: "文件不存在或已被删除",
+    err403: "没有权限读取这个文件",
+    errOther: "下载失败（HTTP {status}）",
+    errNetwork: "下载失败，请检查连接",
+    givingUp: "文件行「⋯」菜单连续注入失败，已自动停止；文件树本身不受影响。",
+    dismiss: "不再提示"
+  };
+  const ROW_MENU_EN = {
+    nav: "File row ⋯ menu",
+    toggleLabel: "Show a ⋯ menu on every file-tree row",
+    toggleHint: "Open it to copy the row's absolute path or download a single file; folder downloads are not supported. This is drawn against the shipped file tree, so a host upgrade may disable it — it only disappears, and the tree itself is unaffected.",
+    ariaLabel: "Row actions",
+    copyPath: "Copy path",
+    download: "Download",
+    folderUnsupported: "Folders not supported",
+    copyFailed: "Copy failed — select the path and copy it manually",
+    err401: "Your session has expired. Refresh the page and sign in again.",
+    err413: "This file is larger than 20 MB and cannot be downloaded yet.",
+    err404: "The file no longer exists or was deleted.",
+    err403: "You do not have permission to read this file.",
+    errOther: "Download failed (HTTP {status}).",
+    errNetwork: "Download failed — check your connection.",
+    givingUp: "The file-row ⋯ menu could not be injected repeatedly and stopped; the file tree itself is unaffected.",
+    dismiss: "Do not show again"
+  };
+
+  /**
+   * Only theme variables that really exist in the shipped theme are used.
+   * No literal colour is written here, so light/dark follows the host.
+   */
+  const ROW_MENU_CSS = [
+    ".dsh-lookout-rowmenu{position:absolute;top:4px;right:4px;z-index:2;display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;padding:0;border:0;border-radius:6px;background:transparent;color:var(--dsw-alias-label-tertiary);cursor:pointer;line-height:1;}",
+    ".dsh-lookout-rowmenu:hover,.dsh-lookout-rowmenu:focus-visible{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover);outline:none;}",
+    ".dsh-lookout-rowmenu svg{display:block;width:16px;height:16px;pointer-events:none;}",
+    ".dsh-lookout-rowmenu[data-lookout-copied]{color:var(--dsw-alias-state-success-primary);}",
+    ".dsh-lookout-rowmenu-pop{position:fixed;z-index:80;min-width:176px;padding:4px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-overlay);color:var(--dsw-alias-label-primary);font-size:13px;line-height:1.4;box-shadow:0 8px 24px var(--dsw-alias-bg-mask-drop);}",
+    ".dsh-lookout-rowmenu-item{display:flex;align-items:center;justify-content:space-between;gap:10px;width:100%;padding:7px 10px;border:0;border-radius:6px;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer;}",
+    ".dsh-lookout-rowmenu-item:hover,.dsh-lookout-rowmenu-item:focus-visible{background:var(--dsw-alias-interactive-bg-hover);outline:none;}",
+    ".dsh-lookout-rowmenu-item[aria-disabled=\"true\"]{color:var(--dsw-alias-label-dimmed);cursor:not-allowed;}",
+    ".dsh-lookout-rowmenu-item[aria-disabled=\"true\"]:hover{background:transparent;}",
+    ".dsh-lookout-rowmenu-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}",
+    ".dsh-lookout-rowmenu-note{flex:none;color:var(--dsw-alias-label-tertiary);font-size:11px;white-space:nowrap;}",
+    ".dsh-lookout-toast{position:fixed;left:50%;bottom:24px;z-index:90;display:flex;align-items:center;gap:10px;max-width:min(92vw,560px);padding:9px 12px;transform:translateX(-50%);border:1px solid var(--dsw-alias-border-l2);border-radius:10px;background:var(--dsw-alias-toast-bg);color:var(--dsw-alias-label-primary-inverted);font-size:12px;line-height:1.5;box-shadow:0 8px 24px var(--dsw-alias-bg-mask-drop);}",
+    ".dsh-lookout-toast-text{min-width:0;}",
+    ".dsh-lookout-toast button{flex:none;padding:3px 8px;border:1px solid var(--dsw-alias-border-l2);border-radius:6px;background:transparent;color:inherit;font:inherit;cursor:pointer;}",
+    ".dsh-lookout-toast button:hover{background:var(--dsw-alias-interactive-bg-hover);}"
+  ].join("\n");
+
+  /** Chinese fallback for every translate call, also used when locale is unavailable. */
+  function rowMenuFallbackText(key, params) {
+    const template = typeof ROW_MENU_ZH[key] === "string" ? ROW_MENU_ZH[key] : key;
+    if (params === null || params === undefined || typeof params !== "object") return template;
+    let text = template;
+    for (const name of Object.keys(params)) text = text.split("{" + name + "}").join(String(params[name]));
+    return text;
+  }
+
+  /** Read one persisted switch; storage being unavailable must never break the feature. */
+  function rowMenuReadFlag(key, fallback) {
+    try {
+      const raw = window.localStorage.getItem(key);
+      if (raw === "1") return true;
+      if (raw === "0") return false;
+      return fallback;
+    } catch { return fallback; }
+  }
+
+  /** Persist one switch; a private-mode storage failure only costs durability. */
+  function rowMenuWriteFlag(key, value) {
+    try { window.localStorage.setItem(key, value ? "1" : "0"); } catch { /* advisory */ }
+  }
+
+  /** One warning per page at most, and only for a real degradation. */
+  let rowMenuWarned = false;
+  function rowMenuWarn(message, error) {
+    if (rowMenuWarned) return;
+    rowMenuWarned = true;
+    try { console.warn("dsh-lookout: " + message, error); } catch { /* no console */ }
+  }
+
+  /**
+   * Start the row menu and hand its disposer to the plugin's own lifecycle.
+   * A separate wrapper keeps the whole install guarded: this UI may never throw
+   * into the host's apply().
+   * @param ctx - the merged plugin's client context.
+   * @param require - the ModuleLoader require, used lazily for primitives/react.
+   * @returns {void}
+   */
+  function rowMenuStart(ctx, require) {
+    let dispose = null;
+    try {
+      dispose = rowMenuInstall(ctx, require);
+    } catch (error) {
+      rowMenuWarn("文件行菜单初始化失败,已跳过(不影响宿主):", error);
+      return;
+    }
+    try {
+      if (ctx !== null && ctx !== undefined && typeof ctx.effect === "function") {
+        ctx.effect(() => dispose, "dsh-lookout: file row menu");
+      } else if (ctx !== null && ctx !== undefined && typeof ctx.on === "function") {
+        ctx.on("dispose", () => { try { dispose(); } catch { /* best effort */ } });
+      }
+    } catch (error) {
+      rowMenuWarn("文件行菜单挂到生命周期失败:", error);
+    }
+  }
+
+  /**
+   * Install the feature and return its teardown.
+   * @param ctx - the merged plugin's client context.
+   * @param require - the ModuleLoader require.
+   * @returns {() => void} disposer: removes every node, restores every style.
+   */
+  function rowMenuInstall(ctx, require) {
+    let disposed = false;
+    let enabled = rowMenuReadFlag(ROW_MENU_ENABLED_KEY, true);
+    let translate = rowMenuFallbackText;
+    let observer = null;
+    let retryTimer = 0;
+    let scanTimer = 0;
+    let painting = false;
+    let paintedAt = 0;
+    let failures = 0;
+    let givenUp = false;
+    let menu = null;
+    let menuAnchor = null;
+    let menuRow = null;
+    let menuPath = "";
+    let toast = null;
+    let toastTimer = 0;
+    const feedbackTimers = new Map();
+    const savedRowPositions = new Map();
+    const savedButtonPadding = new Map();
+
+    // ---- locale ---------------------------------------------------------
+    try {
+      const locale = ctx !== null && ctx !== undefined ? ctx.locale : null;
+      if (locale !== null && locale !== undefined && typeof locale.register === "function") {
+        const register = () => locale.register(ROW_MENU_NS, { zh: ROW_MENU_ZH, en: ROW_MENU_EN });
+        if (typeof ctx.effect === "function") ctx.effect(register, "dsh-lookout: file row menu dictionaries");
+        else register();
+      }
+      if (locale !== null && locale !== undefined && typeof locale.bind === "function") {
+        const bound = locale.bind(ROW_MENU_NS);
+        translate = (key, params) => {
+          let text = key;
+          try { text = bound(key, params); } catch { text = key; }
+          return typeof text === "string" && text !== key ? text : rowMenuFallbackText(key, params);
+        };
+      }
+    } catch (error) {
+      // Chinese fallback is already in translate.
+    }
+
+    // ---- settings page --------------------------------------------------
+    // One item, its own section: the three bundled parts own their own pages and
+    // are byte-locked, so this feature registers its own settings.section (order
+    // 55, between icon management at 50 and mail at 60).
+    try {
+      const React = require("react");
+      if (React !== null && typeof React.createElement === "function" && typeof React.useState === "function") {
+        function RowMenuSection(props) {
+          const label = props !== null && props !== undefined && typeof props.t === "function" ? props.t : translate;
+          const [checked, setChecked] = React.useState(() => rowMenuReadFlag(ROW_MENU_ENABLED_KEY, true));
+          const onChange = (event) => {
+            const next = event.target.checked === true;
+            setChecked(next);
+            setEnabled(next);
+          };
+          return React.createElement("div", { "data-lookout-settings": "row-menu" },
+            React.createElement("div", { style: { fontSize: 13, fontWeight: 600, color: "var(--dsw-alias-label-primary)", marginBottom: 8 } }, label("nav")),
+            React.createElement("label", { style: { display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--dsw-alias-label-primary)", cursor: "pointer" } },
+              React.createElement("input", { type: "checkbox", checked, onChange }),
+              React.createElement("span", null, label("toggleLabel"))
+            ),
+            React.createElement("div", { style: { marginTop: 6, fontSize: 12, lineHeight: 1.6, color: "var(--dsw-alias-label-tertiary)" } }, label("toggleHint"))
+          );
+        }
+        const slots = ctx !== null && ctx !== undefined ? ctx.slots : null;
+        if (slots !== null && slots !== undefined && typeof slots.inject === "function" && typeof slots.register === "function") {
+          slots.inject("settings.section", () => slots.register({
+            name: "settings.section",
+            id: "lookout-row-menu",
+            order: 55,
+            label: () => translate("nav"),
+            locale: ROW_MENU_NS,
+            inject: () => ({ t: translate })
+          }, (props) => React.createElement(RowMenuSection, {
+            t: props !== null && props !== undefined && typeof props.t === "function" ? props.t : translate
+          })));
+        }
+      }
+    } catch (error) {
+      // Settings are optional; the feature itself is not.
+    }
+
+    // ---- style ----------------------------------------------------------
+    function ensureStyleTag() {
+      try {
+        if (document.querySelector('style[data-plugin-css="' + ROW_MENU_STYLE_KEY + '"]') !== null) return;
+        const tag = document.createElement("style");
+        tag.setAttribute("data-plugin", "dsh-lookout");
+        tag.setAttribute("data-plugin-css", ROW_MENU_STYLE_KEY);
+        tag.textContent = ROW_MENU_CSS;
+        const head = document.head !== null && document.head !== undefined ? document.head : document.body;
+        if (head !== null && head !== undefined) head.appendChild(tag);
+      } catch (error) { /* styling is best effort */ }
+    }
+
+    // ---- injected row button -------------------------------------------
+    function directRowButton(row) {
+      for (const child of row.children) {
+        if (child.tagName === "BUTTON" && child.getAttribute(ROW_MENU_ATTR) === null) return child;
+      }
+      return null;
+    }
+
+    function directMenuButton(row) {
+      for (const child of row.children) {
+        if (child.getAttribute(ROW_MENU_ATTR) !== null) return child;
+      }
+      return null;
+    }
+
+    function ensureStyles(row, rowButton) {
+      if (!savedRowPositions.has(row)) savedRowPositions.set(row, row.style.position);
+      try {
+        if (window.getComputedStyle(row).position === "static") row.style.position = "relative";
+      } catch { row.style.position = "relative"; }
+      if (!savedButtonPadding.has(rowButton)) savedButtonPadding.set(rowButton, rowButton.style.paddingRight);
+      if (rowButton.style.paddingRight !== ROW_MENU_BUTTON_PADDING) rowButton.style.paddingRight = ROW_MENU_BUTTON_PADDING;
+    }
+
+    function pruneDetachedStyles() {
+      for (const [row, position] of savedRowPositions) {
+        if (row.isConnected) continue;
+        try { row.style.position = position; } catch { /* detached */ }
+        savedRowPositions.delete(row);
+      }
+      for (const [button, padding] of savedButtonPadding) {
+        if (button.isConnected) continue;
+        try { button.style.paddingRight = padding; } catch { /* detached */ }
+        savedButtonPadding.delete(button);
+      }
+    }
+
+    function restoreStyles() {
+      for (const [row, position] of savedRowPositions) { try { row.style.position = position; } catch { /* detached */ } }
+      for (const [button, padding] of savedButtonPadding) { try { button.style.paddingRight = padding; } catch { /* detached */ } }
+      savedRowPositions.clear();
+      savedButtonPadding.clear();
+    }
+
+    function svgRoot() {
+      const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      svg.setAttribute("viewBox", "0 0 16 16");
+      svg.setAttribute("width", "16");
+      svg.setAttribute("height", "16");
+      svg.setAttribute("aria-hidden", "true");
+      svg.setAttribute("focusable", "false");
+      svg.setAttribute("fill", "currentColor");
+      return svg;
+    }
+
+    /** The only menu glyph: three dots, drawn here so no primitives icon is required. */
+    function dotsIcon() {
+      const svg = svgRoot();
+      for (const cx of [3, 8, 13]) {
+        const dot = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+        dot.setAttribute("cx", String(cx));
+        dot.setAttribute("cy", "8");
+        dot.setAttribute("r", "1.4");
+        svg.appendChild(dot);
+      }
+      return svg;
+    }
+
+    /** Copy feedback: the same button briefly shows a check. */
+    function checkIcon() {
+      const svg = svgRoot();
+      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      path.setAttribute("d", "M3.5 8.5 6.6 11.5 12.5 4.8");
+      path.setAttribute("fill", "none");
+      path.setAttribute("stroke", "currentColor");
+      path.setAttribute("stroke-width", "1.8");
+      path.setAttribute("stroke-linecap", "round");
+      path.setAttribute("stroke-linejoin", "round");
+      svg.appendChild(path);
+      return svg;
+    }
+
+    function setButtonIcon(button, copied) {
+      try {
+        while (button.firstChild !== null) button.removeChild(button.firstChild);
+        button.appendChild(copied ? checkIcon() : dotsIcon());
+        if (copied) button.setAttribute("data-lookout-copied", "");
+        else button.removeAttribute("data-lookout-copied");
+      } catch (error) { /* best effort */ }
+    }
+
+    function flashCopied(button) {
+      if (button === null || button === undefined || !button.isConnected) return;
+      const pending = feedbackTimers.get(button);
+      if (pending !== undefined) { try { window.clearTimeout(pending); } catch { /* gone */ } }
+      setButtonIcon(button, true);
+      const timer = window.setTimeout(() => {
+        feedbackTimers.delete(button);
+        if (button.isConnected) setButtonIcon(button, false);
+      }, ROW_MENU_FEEDBACK_MS);
+      feedbackTimers.set(button, timer);
+    }
+
+    function createRowButton() {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "dsh-lookout-rowmenu";
+      button.setAttribute(ROW_MENU_ATTR, "");
+      button.setAttribute("aria-haspopup", "menu");
+      button.setAttribute("aria-expanded", "false");
+      button.setAttribute("aria-label", translate("ariaLabel"));
+      button.title = translate("ariaLabel");
+      button.appendChild(dotsIcon());
+      button.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (disposed) return;
+        if (menuAnchor === button) { closeMenu(); return; }
+        const path = button.getAttribute("data-lookout-path");
+        openMenu(button, typeof path === "string" ? path : "", button.getAttribute("data-lookout-directory") === "1");
+      });
+      return button;
+    }
+
+    // ---- scan / injection ----------------------------------------------
+    function scan() {
+      if (disposed || !enabled || givenUp) return;
+      if (document.querySelector(ROW_MENU_BODY_SELECTOR) === null) return;
+      painting = true;
+      let placed = 0;
+      let missed = 0;
+      let failure = null;
+      try {
+        pruneDetachedStyles();
+        const bodies = document.querySelectorAll(ROW_MENU_BODY_SELECTOR);
+        for (const body of bodies) {
+          const rows = body.querySelectorAll(ROW_MENU_ROWS_SELECTOR);
+          for (const row of rows) {
+            const path = row.getAttribute(ROW_MENU_PATH_ATTR);
+            if (typeof path !== "string" || path === "") { missed++; continue; }
+            const rowButton = directRowButton(row);
+            if (rowButton === null) { missed++; continue; }
+            const isDirectory = row.getAttribute("data-files-entry") === "directory";
+            ensureStyles(row, rowButton);
+            let button = directMenuButton(row);
+            if (button === null) {
+              button = createRowButton();
+              rowButton.insertAdjacentElement("afterend", button);
+            }
+            const previousPath = button.getAttribute("data-lookout-path");
+            if (previousPath !== path) {
+              if (menuAnchor === button) closeMenu();
+              button.setAttribute("data-lookout-path", path);
+            }
+            button.setAttribute("data-lookout-directory", isDirectory ? "1" : "0");
+            button.setAttribute("aria-label", translate("ariaLabel"));
+            button.title = translate("ariaLabel");
+            placed++;
+          }
+        }
+        if (menuAnchor !== null) {
+          const rowPathNow = menuRow !== null && menuRow.isConnected ? menuRow.getAttribute(ROW_MENU_PATH_ATTR) : null;
+          if (!menuAnchor.isConnected || menuRow === null || !menuRow.isConnected || rowPathNow !== menuPath) closeMenu();
+        }
+      } catch (error) {
+        failure = error;
+      } finally {
+        painting = false;
+        paintedAt = Date.now();
+      }
+      if (placed > 0) failures = 0;
+      else if (failure !== null) noteFailure(failure);
+      else if (missed > 0) noteFailure("no eligible row could take the menu button");
+    }
+
+    function noteFailure(why) {
+      if (givenUp) return;
+      failures++;
+      if (failures === 1) rowMenuWarn("文件行菜单注入失败,已降级(不影响文件树):", why);
+      if (failures < ROW_MENU_MAX_FAILURES) return;
+      givenUp = true;
+      stopWatching();
+      if (!rowMenuReadFlag(ROW_MENU_DISMISSED_KEY, false)) showToast(translate("givingUp"), true);
+    }
+
+    // ---- watchers -------------------------------------------------------
+    function ensureObserver() {
+      if (observer !== null || disposed || !enabled || givenUp) return;
+      if (typeof window.MutationObserver !== "function") return;
+      const root = document.body;
+      if (root === null || root === undefined) return;
+      observer = new window.MutationObserver(onMutations);
+      observer.observe(root, { childList: true, subtree: true });
+    }
+
+    function onMutations() {
+      if (disposed || !enabled || givenUp) return;
+      try {
+        if (painting) return;
+        if (Date.now() - paintedAt < ROW_MENU_QUIET_MS) return;
+        if (menuAnchor !== null && !menuAnchor.isConnected) closeMenu();
+        if (document.querySelector(ROW_MENU_BODY_SELECTOR) === null) {
+          if (retryTimer === 0) retryTimer = window.setInterval(attachContainer, 1000);
+          return;
+        }
+        scheduleScan();
+      } catch (error) {
+        noteFailure(error);
+      }
+    }
+
+    function scheduleScan() {
+      if (disposed || !enabled || givenUp) return;
+      if (scanTimer !== 0) { try { window.clearTimeout(scanTimer); } catch { /* gone */ } }
+      scanTimer = window.setTimeout(() => { scanTimer = 0; scan(); }, ROW_MENU_SCAN_DEBOUNCE);
+    }
+
+    function attachContainer() {
+      if (disposed || !enabled || givenUp) return true;
+      ensureObserver();
+      if (document.querySelector(ROW_MENU_BODY_SELECTOR) === null) return false;
+      scheduleScan();
+      if (observer !== null && retryTimer !== 0) {
+        try { window.clearInterval(retryTimer); } catch { /* gone */ }
+        retryTimer = 0;
+      }
+      return true;
+    }
+
+    function startWatching() {
+      if (disposed || !enabled || givenUp) return;
+      ensureObserver();
+      if (document.querySelector(ROW_MENU_BODY_SELECTOR) === null) {
+        if (retryTimer === 0) retryTimer = window.setInterval(attachContainer, 1000);
+      } else {
+        scheduleScan();
+      }
+      // No MutationObserver in this build: the 1s retry is the only updater left.
+      if (observer === null && retryTimer === 0) retryTimer = window.setInterval(attachContainer, 1000);
+    }
+
+    function stopWatching() {
+      if (observer !== null) { try { observer.disconnect(); } catch { /* gone */ } observer = null; }
+      if (retryTimer !== 0) { try { window.clearInterval(retryTimer); } catch { /* gone */ } retryTimer = 0; }
+      if (scanTimer !== 0) { try { window.clearTimeout(scanTimer); } catch { /* gone */ } scanTimer = 0; }
+      painting = false;
+    }
+
+    // ---- switch ---------------------------------------------------------
+    function setEnabled(next) {
+      const on = next === true;
+      enabled = on;
+      rowMenuWriteFlag(ROW_MENU_ENABLED_KEY, on);
+      if (disposed) return;
+      if (!on) {
+        stopWatching();
+        closeMenu();
+        hideToast();
+        removeInjected();
+        return;
+      }
+      givenUp = false;
+      failures = 0;
+      hideToast();
+      startWatching();
+    }
+
+    function removeInjected() {
+      try { document.querySelectorAll("[" + ROW_MENU_ATTR + "]").forEach((node) => node.remove()); } catch { /* gone */ }
+      restoreStyles();
+      for (const timer of feedbackTimers.values()) { try { window.clearTimeout(timer); } catch { /* gone */ } }
+      feedbackTimers.clear();
+    }
+
+    // ---- menu -----------------------------------------------------------
+    function createMenuItem(label, onActivate) {
+      const item = document.createElement("button");
+      item.type = "button";
+      item.className = "dsh-lookout-rowmenu-item";
+      item.setAttribute("role", "menuitem");
+      const text = document.createElement("span");
+      text.className = "dsh-lookout-rowmenu-label";
+      text.textContent = label;
+      item.appendChild(text);
+      if (typeof onActivate === "function") {
+        item.addEventListener("click", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          onActivate();
+        });
+      }
+      return item;
+    }
+
+    function openMenu(anchor, path, isDirectory) {
+      if (disposed) return;
+      if (document.body === null || document.body === undefined) return;
+      closeMenu();
+      const popup = document.createElement("div");
+      popup.className = "dsh-lookout-rowmenu-pop";
+      popup.setAttribute(ROW_MENU_POP_ATTR, "");
+      popup.setAttribute("role", "menu");
+      popup.setAttribute("aria-label", translate("ariaLabel"));
+
+      const copy = createMenuItem(translate("copyPath"), () => {
+        closeMenu();
+        void copyRowPath(path, anchor);
+      });
+      popup.appendChild(copy);
+
+      const download = createMenuItem(translate("download"), null);
+      if (isDirectory) {
+        download.disabled = true;
+        download.setAttribute("aria-disabled", "true");
+        const note = document.createElement("span");
+        note.className = "dsh-lookout-rowmenu-note";
+        note.textContent = translate("folderUnsupported");
+        download.appendChild(note);
+      } else {
+        download.setAttribute("aria-disabled", "false");
+        download.addEventListener("click", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          closeMenu();
+          void downloadRowFile(path);
+        });
+      }
+      popup.appendChild(download);
+
+      document.body.appendChild(popup);
+      positionMenu(popup, anchor);
+      menu = popup;
+      menuAnchor = anchor;
+      menuRow = anchor.closest("li");
+      menuPath = path;
+      anchor.setAttribute("aria-expanded", "true");
+      paintedAt = Date.now();
+      document.addEventListener("pointerdown", onDocumentPointerDown, true);
+      document.addEventListener("keydown", onDocumentKeyDown, true);
+      window.addEventListener("scroll", closeMenu, true);
+      window.addEventListener("resize", closeMenu, true);
+      window.setTimeout(() => {
+        if (menu !== popup) return;
+        const first = popup.querySelector('[role="menuitem"]:not([disabled])');
+        if (first !== null) { try { first.focus(); } catch { /* best effort */ } }
+      }, 0);
+    }
+
+    function positionMenu(popup, anchor) {
+      try {
+        const anchorRect = anchor.getBoundingClientRect();
+        const popupRect = popup.getBoundingClientRect();
+        const margin = 8;
+        const gap = 6;
+        let left = anchorRect.right - popupRect.width;
+        let top = anchorRect.bottom + gap;
+        const maxLeft = window.innerWidth - popupRect.width - margin;
+        if (left > maxLeft) left = maxLeft;
+        if (left < margin) left = margin;
+        if (top + popupRect.height > window.innerHeight - margin) top = anchorRect.top - popupRect.height - gap;
+        if (top < margin) top = margin;
+        popup.style.left = Math.round(left) + "px";
+        popup.style.top = Math.round(top) + "px";
+      } catch (error) { /* the CSS default is still usable */ }
+    }
+
+    function closeMenu() {
+      if (menu === null) return;
+      const popup = menu;
+      const anchor = menuAnchor;
+      menu = null;
+      menuAnchor = null;
+      menuRow = null;
+      menuPath = "";
+      try { popup.remove(); } catch { /* gone */ }
+      if (anchor !== null) { try { anchor.setAttribute("aria-expanded", "false"); } catch { /* gone */ } }
+      document.removeEventListener("pointerdown", onDocumentPointerDown, true);
+      document.removeEventListener("keydown", onDocumentKeyDown, true);
+      window.removeEventListener("scroll", closeMenu, true);
+      window.removeEventListener("resize", closeMenu, true);
+    }
+
+    function onDocumentPointerDown(event) {
+      if (menu === null) return;
+      const target = event.target;
+      if (target !== null && target !== undefined) {
+        if (menu.contains(target)) return;
+        if (menuAnchor !== null && menuAnchor.contains(target)) return;
+      }
+      closeMenu();
+    }
+
+    function onDocumentKeyDown(event) {
+      if (menu === null) return;
+      if (event.key === "Escape" || event.key === "Esc") {
+        event.preventDefault();
+        event.stopPropagation();
+        const anchor = menuAnchor;
+        closeMenu();
+        if (anchor !== null) { try { anchor.focus(); } catch { /* gone */ } }
+        return;
+      }
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        const items = [];
+        for (const item of menu.querySelectorAll('[role="menuitem"]')) {
+          if (item.disabled !== true) items.push(item);
+        }
+        if (items.length === 0) return;
+        event.preventDefault();
+        const current = items.indexOf(document.activeElement);
+        const step = event.key === "ArrowDown" ? 1 : -1;
+        const next = current < 0 ? (step > 0 ? 0 : items.length - 1) : (current + step + items.length) % items.length;
+        try { items[next].focus(); } catch { /* best effort */ }
+      }
+    }
+
+    // ---- clipboard ------------------------------------------------------
+    function requirePrimitives() {
+      try { return require("@deepseek-ai/dsh-client-ui-primitives"); } catch { return null; }
+    }
+
+    async function writeClipboardText(text) {
+      const primitives = requirePrimitives();
+      if (primitives !== null && primitives !== undefined && typeof primitives.writeClipboard === "function") {
+        try {
+          const result = await primitives.writeClipboard(text);
+          if (result !== false) return true;
+        } catch (error) { /* fall through */ }
+      }
+      try {
+        if (typeof navigator !== "undefined" && navigator.clipboard !== null && navigator.clipboard !== undefined && typeof navigator.clipboard.writeText === "function") {
+          await navigator.clipboard.writeText(text);
+          return true;
+        }
+      } catch (error) { /* fall through */ }
+      try {
+        const area = document.createElement("textarea");
+        area.value = text;
+        area.setAttribute("readonly", "");
+        area.style.position = "fixed";
+        area.style.top = "0";
+        area.style.left = "-9999px";
+        area.style.opacity = "0";
+        document.body.appendChild(area);
+        area.focus();
+        area.select();
+        const copied = typeof document.execCommand === "function" && document.execCommand("copy") === true;
+        area.remove();
+        return copied;
+      } catch (error) { return false; }
+    }
+
+    async function copyRowPath(path, anchor) {
+      let copied = false;
+      try { copied = await writeClipboardText(path); } catch { copied = false; }
+      if (disposed) return;
+      if (copied) flashCopied(anchor);
+      else showToast(translate("copyFailed"), false);
+    }
+
+    // ---- download -------------------------------------------------------
+    function fileNameFor(path) {
+      const trimmed = path.replace(/[/\\]+$/, "");
+      const slash = Math.max(trimmed.lastIndexOf("/"), trimmed.lastIndexOf("\\"));
+      const last = slash >= 0 ? trimmed.slice(slash + 1) : trimmed;
+      try { return decodeURIComponent(last) || "download"; } catch { return last || "download"; }
+    }
+
+    function downloadErrorText(status) {
+      switch (status) {
+        case 401: return translate("err401");
+        case 413: return translate("err413");
+        case 404: return translate("err404");
+        case 403: return translate("err403");
+        default: return translate("errOther", { status: status > 0 ? status : "?" });
+      }
+    }
+
+    async function downloadRowFile(path) {
+      let response = null;
+      try {
+        response = await window.fetch("api/file?path=" + encodeURIComponent(path), { credentials: "same-origin" });
+      } catch (error) {
+        if (!disposed) showToast(translate("errNetwork"), false);
+        return;
+      }
+      if (response === null || response.ok !== true) {
+        const status = response !== null && typeof response.status === "number" ? response.status : 0;
+        if (!disposed) showToast(downloadErrorText(status), false);
+        return;
+      }
+      try {
+        const blob = await response.blob();
+        if (disposed) return;
+        const objectUrl = window.URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = objectUrl;
+        link.download = fileNameFor(path);
+        link.rel = "noopener";
+        link.style.display = "none";
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        window.setTimeout(() => { try { window.URL.revokeObjectURL(objectUrl); } catch { /* gone */ } }, 1000);
+      } catch (error) {
+        if (!disposed) showToast(translate("errNetwork"), false);
+      }
+    }
+
+    // ---- toast ----------------------------------------------------------
+    function showToast(message, dismissable) {
+      if (disposed) return;
+      if (document.body === null || document.body === undefined) return;
+      hideToast();
+      const box = document.createElement("div");
+      box.className = "dsh-lookout-toast";
+      box.setAttribute(ROW_MENU_TOAST_ATTR, "");
+      box.setAttribute("role", "status");
+      box.setAttribute("aria-live", "polite");
+      const text = document.createElement("span");
+      text.className = "dsh-lookout-toast-text";
+      text.textContent = message;
+      box.appendChild(text);
+      if (dismissable === true) {
+        const dismiss = document.createElement("button");
+        dismiss.type = "button";
+        dismiss.textContent = translate("dismiss");
+        dismiss.addEventListener("click", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          rowMenuWriteFlag(ROW_MENU_DISMISSED_KEY, true);
+          hideToast();
+        });
+        box.appendChild(dismiss);
+      }
+      document.body.appendChild(box);
+      toast = box;
+      paintedAt = Date.now();
+      toastTimer = window.setTimeout(hideToast, ROW_MENU_TOAST_MS);
+    }
+
+    function hideToast() {
+      if (toastTimer !== 0) { try { window.clearTimeout(toastTimer); } catch { /* gone */ } toastTimer = 0; }
+      if (toast !== null) { try { toast.remove(); } catch { /* gone */ } toast = null; }
+    }
+
+    // ---- lifecycle ------------------------------------------------------
+    function dispose() {
+      if (disposed) return;
+      disposed = true;
+      try { stopWatching(); } catch { /* best effort */ }
+      try { closeMenu(); } catch { /* best effort */ }
+      try { hideToast(); } catch { /* best effort */ }
+      try { removeInjected(); } catch { /* best effort */ }
+      try { document.querySelectorAll('style[data-plugin-css="' + ROW_MENU_STYLE_KEY + '"]').forEach((node) => node.remove()); } catch { /* best effort */ }
+    }
+
+    ensureStyleTag();
+    if (enabled) startWatching();
+    return dispose;
+  }
+  //#endregion
+
   window.__ModuleLoader__.load({
     id: "dsh-lookout",
     factory: (require) => {
@@ -7308,6 +8135,10 @@ window.__ModuleLoader__.load({
       return {
         inject: __inject,
         apply(ctx) {
+          // The file-row "⋯" menu is independent of the three bundled parts, so it
+          // starts first and owns its own try/catch: a fault in any part (or a
+          // missing files panel) only costs this feature, never the host.
+          rowMenuStart(ctx, require);
           for (const m of __mods) { if (m && typeof m.apply === "function") m.apply(ctx); }
         },
       };
