@@ -7339,6 +7339,15 @@ window.__ModuleLoader__.load({
   const ROW_MENU_QUIET_MS = 250;
   const ROW_MENU_FEEDBACK_MS = 1500;
   const ROW_MENU_TOAST_MS = 3000;
+  /**
+   * How long after opening the menu a scroll/resize counts as part of the tap.
+   *
+   * Phones fire scroll and resize while the tap is still settling (visual viewport
+   * shifts, focus-driven scrolling, the browser chrome collapsing). Closing on those
+   * made the menu flash and vanish on mobile, so inside this window the menu only
+   * repositions; a later, real scroll closes it as usual.
+   */
+  const ROW_MENU_SCROLL_GRACE_MS = 700;
   const ROW_MENU_BUTTON_PADDING = "32px";
   const ROW_MENU_ENABLED_KEY = "dsh-lookout:file-row-menu:enabled";
   const ROW_MENU_DISMISSED_KEY = "dsh-lookout:file-row-menu:gave-up-dismissed";
@@ -7386,12 +7395,12 @@ window.__ModuleLoader__.load({
    * No literal colour is written here, so light/dark follows the host.
    */
   const ROW_MENU_CSS = [
-    ".dsh-lookout-rowmenu{position:absolute;top:4px;right:4px;z-index:2;display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;padding:0;border:0;border-radius:6px;background:transparent;color:var(--dsw-alias-label-tertiary);cursor:pointer;line-height:1;}",
+    ".dsh-lookout-rowmenu{position:absolute;top:4px;right:4px;z-index:2;display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;padding:0;border:0;border-radius:6px;background:transparent;color:var(--dsw-alias-label-tertiary);cursor:pointer;line-height:1;touch-action:manipulation;-webkit-tap-highlight-color:transparent;}",
     ".dsh-lookout-rowmenu:hover,.dsh-lookout-rowmenu:focus-visible{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover);outline:none;}",
     ".dsh-lookout-rowmenu svg{display:block;width:16px;height:16px;pointer-events:none;}",
     ".dsh-lookout-rowmenu[data-lookout-copied]{color:var(--dsw-alias-state-success-primary);}",
-    ".dsh-lookout-rowmenu-pop{position:fixed;z-index:80;min-width:176px;padding:4px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-overlay);color:var(--dsw-alias-label-primary);font-size:13px;line-height:1.4;box-shadow:0 8px 24px var(--dsw-alias-bg-mask-drop);}",
-    ".dsh-lookout-rowmenu-item{display:flex;align-items:center;justify-content:space-between;gap:10px;width:100%;padding:7px 10px;border:0;border-radius:6px;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer;}",
+    ".dsh-lookout-rowmenu-pop{position:fixed;z-index:2147482000;min-width:176px;padding:4px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-overlay);color:var(--dsw-alias-label-primary);font-size:13px;line-height:1.4;box-shadow:0 8px 24px var(--dsw-alias-bg-mask-drop);}",
+    ".dsh-lookout-rowmenu-item{display:flex;align-items:center;justify-content:space-between;gap:10px;width:100%;padding:7px 10px;border:0;border-radius:6px;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer;touch-action:manipulation;-webkit-tap-highlight-color:transparent;}",
     ".dsh-lookout-rowmenu-item:hover,.dsh-lookout-rowmenu-item:focus-visible{background:var(--dsw-alias-interactive-bg-hover);outline:none;}",
     ".dsh-lookout-rowmenu-item[aria-disabled=\"true\"]{color:var(--dsw-alias-label-dimmed);cursor:not-allowed;}",
     ".dsh-lookout-rowmenu-item[aria-disabled=\"true\"]:hover{background:transparent;}",
@@ -7483,6 +7492,7 @@ window.__ModuleLoader__.load({
     let menuAnchor = null;
     let menuRow = null;
     let menuPath = "";
+    let menuOpenedAt = 0;
     let toast = null;
     let toastTimer = 0;
     const feedbackTimers = new Map();
@@ -7899,16 +7909,19 @@ window.__ModuleLoader__.load({
       menuAnchor = anchor;
       menuRow = anchor.closest("li");
       menuPath = path;
+      menuOpenedAt = Date.now();
       anchor.setAttribute("aria-expanded", "true");
       paintedAt = Date.now();
       document.addEventListener("pointerdown", onDocumentPointerDown, true);
       document.addEventListener("keydown", onDocumentKeyDown, true);
-      window.addEventListener("scroll", closeMenu, true);
-      window.addEventListener("resize", closeMenu, true);
+      window.addEventListener("scroll", onDocumentScroll, true);
+      window.addEventListener("resize", repositionMenu, true);
+      watchVisualViewport(true);
       window.setTimeout(() => {
         if (menu !== popup) return;
         const first = popup.querySelector('[role="menuitem"]:not([disabled])');
-        if (first !== null) { try { first.focus(); } catch { /* best effort */ } }
+        if (first === null) return;
+        try { first.focus({ preventScroll: true }); } catch { try { first.focus(); } catch { /* best effort */ } }
       }, 0);
     }
 
@@ -7942,8 +7955,40 @@ window.__ModuleLoader__.load({
       if (anchor !== null) { try { anchor.setAttribute("aria-expanded", "false"); } catch { /* gone */ } }
       document.removeEventListener("pointerdown", onDocumentPointerDown, true);
       document.removeEventListener("keydown", onDocumentKeyDown, true);
-      window.removeEventListener("scroll", closeMenu, true);
-      window.removeEventListener("resize", closeMenu, true);
+      window.removeEventListener("scroll", onDocumentScroll, true);
+      window.removeEventListener("resize", repositionMenu, true);
+      watchVisualViewport(false);
+    }
+
+    /** Move the open menu back inside the viewport without closing it. */
+    function repositionMenu() {
+      if (menu === null || menuAnchor === null) return;
+      positionMenu(menu, menuAnchor);
+    }
+
+    /**
+     * A scroll normally means the anchor moved, but a phone fires one while the tap
+     * settles; that churn must not close the menu the tap just opened.
+     */
+    function onDocumentScroll() {
+      if (menu === null) return;
+      if (Date.now() - menuOpenedAt < ROW_MENU_SCROLL_GRACE_MS) { repositionMenu(); return; }
+      closeMenu();
+    }
+
+    /** Follow the visual viewport (URL bar, on-screen keyboard) instead of dying with it. */
+    function watchVisualViewport(on) {
+      try {
+        const viewport = window.visualViewport;
+        if (viewport === null || viewport === undefined || typeof viewport.addEventListener !== "function") return;
+        if (on) {
+          viewport.addEventListener("resize", repositionMenu);
+          viewport.addEventListener("scroll", repositionMenu);
+        } else {
+          viewport.removeEventListener("resize", repositionMenu);
+          viewport.removeEventListener("scroll", repositionMenu);
+        }
+      } catch { /* older browsers simply skip the follow-up */ }
     }
 
     function onDocumentPointerDown(event) {
