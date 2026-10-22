@@ -8172,6 +8172,1899 @@ window.__ModuleLoader__.load({
   }
   //#endregion
 
+  //#region workspace rows
+  /**
+   * Workspace-sidebar tags, whole-group hiding, and the "Workspaces" settings table.
+   *
+   * Why the merge glue: the three bundled parts are byte-locked by
+   * test/merged-client.test.mjs, and the shipped workspace browser is a single
+   * opaque seat (sidebar.workspaces, kind single) with no per-row children, so a
+   * tag can only be injected and hiding can only be a style rule. Both are built
+   * to fail silently and never throw into the host's render tree.
+   *
+   * Host contract (read-only reference: @deepseek-ai/dsh-client-ui-workspace):
+   *   [data-slot="sidebar.workspaces"]
+   *     div.groupSection                        one per workspace; children nest
+   *       div[role="treeitem"][data-row-key="workspace:<id>"]
+   *         span.projectText > span.title
+   *         span.rowActions                     hover actions ("⋯" + new session)
+   *       div[role="group"] > div.groupSection    child workspaces
+   *       div[role="treeitem"][data-row-key="session:<id>"][aria-selected]
+   *       button[data-row-key="overflow:<key>"]
+   *
+   * Tag placement is row-level: the badge is a direct child of the workspace
+   * row, immediately before span.rowActions (or at the row's end when the host
+   * renders no actions). margin-left:auto pushes it to the right edge; the
+   * row's own gap supplies the minimum spacing from the name. The idempotency
+   * key is data-lookout-ws-tag="<workspaceId>".
+   *
+   * Hiding is one generated rule per hidden workspace, with every selector
+   * scoped to the group wrapper one/two levels above the keyed row (the shipped
+   * HoverCard wraps its anchor in a <span>):
+   *   div:has(> [data-row-key="workspace:<id>"]),
+   *   div:has(>span>[data-row-key="workspace:<id>"]), {display:none!important}
+   * plus .*groupSection variants of the same two shapes. :has() hides the whole
+   * group (workspace row + its sessions + the "expand" button) without touching
+   * React. No rule is ever generated for a workspace that contains the CURRENT
+   * session, nor for any of its ancestors.
+   *
+   * Preferences live on the Host (iconCustom/getWorkspacePrefs /
+   * setWorkspacePrefs, full-document replace) with a localStorage mirror used
+   * first on load and kept as the fallback when RPC is unavailable. A save
+   * failure is reported once, never per keystroke.
+   *
+   * Breaker (the row-menu pattern): three consecutive scans that place nothing
+   * while there IS work to place stop the feature for the page, warn once,
+   * explain once, and can be reset from the settings switch.
+   */
+  /**
+   * Own locale namespace. locale.register() THROWS when a namespace already owns a
+   * locale, and the file-row menu above already registers zh/en under
+   * "dsh-lookout"; sharing it would silently drop these dictionaries.
+   */
+  const WS_ROWS_NS = "dsh-lookout-workspaces";
+  const WS_TAG_ATTR = "data-lookout-ws-tag";
+  const WS_TAG_TEXT_ATTR = "data-lookout-ws-tag-text";
+  const WS_TOAST_ATTR = "data-lookout-ws-toast";
+  const WS_STYLE_KEY = "lookout-workspace-rows";
+  const WS_HIDE_STYLE_KEY = "lookout-workspace-hide";
+  const WS_PREFS_LOCAL_KEY = "dsh-lookout.workspacePrefs";
+  const WS_ROWS_ENABLED_KEY = "dsh-lookout:workspace-rows:enabled";
+  const WS_ROWS_DISMISSED_KEY = "dsh-lookout:workspace-rows:gave-up-dismissed";
+  const WS_MAX_FAILURES = 3;
+  const WS_SCAN_DEBOUNCE = 200;
+  const WS_QUIET_MS = 250;
+  const WS_TOAST_MS = 3000;
+  const WS_SAVE_DEBOUNCE = 250;
+  const WS_TAG_MAX = 6;
+  /** Pin replay: coalesce list churn, then move only what is out of place. */
+  const WS_PIN_DEBOUNCE = 150;
+  const WS_PIN_MAX_ROUNDS = 5;
+  const WS_PIN_MAX_MOVES = 32;
+  /** A refused reorder backs off, then gives up: no RPC hammering on a broken host. */
+  const WS_PIN_RETRY_MS = 2000;
+  const WS_PIN_MAX_FAILURES = 3;
+  /** Same eight names the Host normalizes to; anything else falls back to gray. */
+  const WS_COLORS = ["red", "orange", "yellow", "green", "cyan", "blue", "purple", "gray"];
+  const WS_COLOR_DEFAULT = "gray";
+  /**
+   * Literal colours for the eight tag dots. Each capsule keeps the host's grey
+   * fill and secondary text colour and draws only its dot in the accent hue;
+   * the rest of the row keeps --dsw-alias-* tokens so light/dark still follows
+   * the host; these hues have no token equivalent.
+   */
+  const WS_COLOR_FALLBACK = {
+    red: "#e5484d",
+    orange: "#f76b15",
+    yellow: "#d9a123",
+    green: "#30a46c",
+    cyan: "#00a2c7",
+    blue: "#3e63dd",
+    purple: "#8e4ec6",
+    gray: "#8b8d98"
+  };
+  const WS_ROW_KEY_ATTR = "data-row-key";
+  const WS_WORKSPACE_PREFIX = "workspace:";
+  const WS_SESSION_PREFIX = "session:";
+  const WS_CONTAINER_SELECTOR = '[data-slot="sidebar.workspaces"]';
+  const WS_CONTAINER_FALLBACK = '[data-slot="sidebar"]';
+  /** Workspace ids are uuid-ish; refuse anything a CSS attribute string cannot carry safely. */
+  const WS_ID_PATTERN = /^[A-Za-z0-9._:-]{1,200}$/;
+  const WS_HIDE_CSS_HEADER = "/* dsh-lookout: hidden workspaces (regenerated on every paint) */";
+
+  const WS_ROWS_CSS = [
+    ".dsh-lookout-ws-tag{display:inline-flex;align-items:center;gap:4px;flex:none;max-width:9em;margin-left:auto;padding:0 6px;height:16px;border-radius:999px;background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-secondary);font-size:11px;line-height:16px;pointer-events:none;overflow:hidden;white-space:nowrap;}",
+    ".dsh-lookout-ws-tag-dot{flex:none;width:6px;height:6px;border-radius:50%;background:" + WS_COLOR_FALLBACK.gray + ";}",
+    ".dsh-lookout-ws-tag-text{min-width:0;overflow:hidden;text-overflow:ellipsis;}",
+    ".dsh-lookout-ws-toast{position:fixed;left:50%;bottom:24px;z-index:90;display:flex;align-items:center;gap:10px;max-width:min(92vw,560px);padding:9px 12px;transform:translateX(-50%);border:1px solid var(--dsw-alias-border-l2);border-radius:10px;background:var(--dsw-alias-toast-bg);color:var(--dsw-alias-label-primary-inverted);font-size:12px;line-height:1.5;box-shadow:0 8px 24px var(--dsw-alias-bg-mask-drop);}",
+    ".dsh-lookout-ws-toast button{flex:none;padding:3px 8px;border:1px solid var(--dsw-alias-border-l2);border-radius:6px;background:transparent;color:inherit;font:inherit;cursor:pointer;}"
+  ].concat(WS_COLORS.map((name) => '.dsh-lookout-ws-tag[data-color="' + name + '"] .dsh-lookout-ws-tag-dot{background:' + WS_COLOR_FALLBACK[name] + ";}")).join("\n");
+
+  /** Chinese fallback for every translate call, also used when locale is unavailable. */
+  const WS_ROWS_ZH = {
+    nav: "工作区管理",
+    toggleLabel: "在侧栏显示工作区标签，并按设置隐藏工作区",
+    toggleHint: "标签只显示在侧栏工作区行右侧（悬停时出现在「⋯」按钮左边）；隐藏是把整个工作区收起（连同它下面的会话和「展开」按钮）。当前会话所在的工作区永远不会被隐藏。这些偏好存在宿主侧，宿主升级后若定位不到工作区行，只会不显示，侧栏本身不受影响。",
+    colName: "工作区",
+    colTag: "标签",
+    colColor: "颜色",
+    colPin: "置顶",
+    colHide: "隐藏",
+    tagPlaceholder: "最多 6 字",
+    pinnedHint: "置顶的工作区排在列表最前；取消置顶会尽量放回原来的位置。子工作区不单独置顶，跟着它的上级工作区排列。",
+    pinChildHint: "子工作区不单独置顶，跟着上级工作区排列。",
+    pinUnavailable: "拿不到工作区服务，置顶只会保存偏好，不会调整顺序。",
+    pinFailed: "工作区置顶没有生效，列表可能保持原样。",
+    cleanup: "清理失效项",
+    cleaned: "已清理 {n} 个失效项",
+    cleanNone: "没有可清理的失效项",
+    empty: "还没有工作区。",
+    colorRed: "红",
+    colorOrange: "橙",
+    colorYellow: "黄",
+    colorGreen: "绿",
+    colorCyan: "青",
+    colorBlue: "蓝",
+    colorPurple: "紫",
+    colorGray: "灰",
+    givingUp: "工作区标签连续注入失败，已自动停止；侧栏本身不受影响。",
+    dismiss: "不再提示",
+    saveFailed: "工作区偏好保存失败，改动只保留在本机。"
+  };
+  const WS_ROWS_EN = {
+    nav: "Workspaces",
+    toggleLabel: "Show workspace tags in the sidebar and hide workspaces as configured",
+    toggleHint: "A tag sits at the right end of the workspace row, just left of the hover actions; hiding collapses a whole workspace group, including its sessions and the expand button. The workspace that holds the current session is never hidden. Preferences live on the host, so a host upgrade can at worst stop the tags from appearing \u2014 the sidebar itself is unaffected.",
+    colName: "Workspace",
+    colTag: "Tag",
+    colColor: "Colour",
+    colPin: "Pin",
+    colHide: "Hide",
+    tagPlaceholder: "Up to 6 characters",
+    pinnedHint: "Pinned workspaces sit at the top of the list; unpinning puts one back where it was. Child workspaces are not pinned on their own \u2014 they follow their parent.",
+    pinChildHint: "Child workspaces are not pinned on their own; they follow their parent workspace.",
+    pinUnavailable: "The workspace service is unavailable, so pinning only saves the preference and never reorders.",
+    pinFailed: "Pinning did not take effect; the list may look unchanged.",
+    cleanup: "Remove stale entries",
+    cleaned: "Removed {n} stale entries",
+    cleanNone: "No stale entries to remove",
+    empty: "No workspaces yet.",
+    colorRed: "Red",
+    colorOrange: "Orange",
+    colorYellow: "Yellow",
+    colorGreen: "Green",
+    colorCyan: "Cyan",
+    colorBlue: "Blue",
+    colorPurple: "Purple",
+    colorGray: "Gray",
+    givingUp: "The workspace tags could not be injected repeatedly and stopped; the sidebar itself is unaffected.",
+    dismiss: "Do not show again",
+    saveFailed: "Workspace preferences could not be saved; changes stay in this browser only."
+  };
+
+  const WS_STYLE_TITLE = { fontSize: 13, fontWeight: 600, color: "var(--dsw-alias-label-primary)", marginBottom: 8 };
+  const WS_STYLE_HINT = { marginTop: 6, fontSize: 12, lineHeight: 1.6, color: "var(--dsw-alias-label-tertiary)" };
+  const WS_STYLE_TABLE = { borderCollapse: "collapse", fontSize: 12, color: "var(--dsw-alias-label-primary)" };
+  const WS_STYLE_TH = { padding: "4px 8px", textAlign: "left", fontWeight: 500, color: "var(--dsw-alias-label-tertiary)", borderBottom: "1px solid var(--dsw-alias-border-l2)" };
+  const WS_STYLE_TD = { padding: "4px 8px", borderBottom: "1px solid var(--dsw-alias-border-l2)", verticalAlign: "middle" };
+  const WS_STYLE_ACTIONS = { display: "flex", alignItems: "center", gap: 12, marginTop: 10 };
+  const WS_STYLE_TOGGLE = { display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--dsw-alias-label-primary)", cursor: "pointer" };
+
+  function wsRowsFallbackText(key, params) {
+    const template = typeof WS_ROWS_ZH[key] === "string" ? WS_ROWS_ZH[key] : key;
+    if (params === null || params === undefined || typeof params !== "object") return template;
+    let text = template;
+    for (const name of Object.keys(params)) text = text.split("{" + name + "}").join(String(params[name]));
+    return text;
+  }
+
+  /** Tag normalization matches the Host: drop control characters, trim, cap at 6 Unicode characters. */
+  function wsRowsNormalizeTag(input) {
+    if (typeof input !== "string") return "";
+    const cleaned = input.replace(/\p{Cc}/gu, "").trim();
+    return [...cleaned].slice(0, WS_TAG_MAX).join("");
+  }
+
+  function wsRowsNormalizeColor(input) {
+    return WS_COLORS.indexOf(input) >= 0 ? input : WS_COLOR_DEFAULT;
+  }
+
+  function wsRowsValidId(input) {
+    return typeof input === "string" && WS_ID_PATTERN.test(input);
+  }
+
+  function wsRowsEmptyDoc() {
+    return { version: 1, workspaces: {} };
+  }
+
+  function wsRowsNormalizeEntry(input) {
+    const source = input !== null && typeof input === "object" && !Array.isArray(input) ? input : {};
+    return {
+      tag: wsRowsNormalizeTag(source.tag),
+      color: wsRowsNormalizeColor(source.color),
+      pinned: source.pinned === true,
+      hidden: source.hidden === true,
+      pinAnchor: typeof source.pinAnchor === "string" ? source.pinAnchor : null
+    };
+  }
+
+  /** Never throws: a corrupt cache or a bad Host response degrades to the empty document. */
+  function wsRowsNormalizeDoc(input) {
+    const doc = wsRowsEmptyDoc();
+    if (input === null || typeof input !== "object" || Array.isArray(input)) return doc;
+    const workspaces = input.workspaces;
+    if (workspaces === null || typeof workspaces !== "object" || Array.isArray(workspaces)) return doc;
+    for (const [id, entry] of Object.entries(workspaces)) {
+      if (!wsRowsValidId(id)) continue;
+      if (id === "__proto__" || id === "constructor" || id === "prototype") continue;
+      doc.workspaces[id] = wsRowsNormalizeEntry(entry);
+    }
+    return doc;
+  }
+
+  /** An entry that carries no preference at all is dropped instead of being kept as junk. */
+  function wsRowsIsDefaultEntry(entry) {
+    return entry.tag === "" && entry.pinned !== true && entry.hidden !== true && entry.pinAnchor === null;
+  }
+
+  function wsRowsReadFlag(key, fallback) {
+    try {
+      const raw = window.localStorage.getItem(key);
+      if (raw === "1") return true;
+      if (raw === "0") return false;
+      return fallback;
+    } catch { return fallback; }
+  }
+
+  function wsRowsWriteFlag(key, value) {
+    try { window.localStorage.setItem(key, value ? "1" : "0"); } catch { /* advisory */ }
+  }
+
+  function wsRowsReadLocalPrefs() {
+    try {
+      const raw = window.localStorage.getItem(WS_PREFS_LOCAL_KEY);
+      if (typeof raw !== "string" || raw === "") return wsRowsEmptyDoc();
+      return wsRowsNormalizeDoc(JSON.parse(raw));
+    } catch { return wsRowsEmptyDoc(); }
+  }
+
+  function wsRowsWriteLocalPrefs(doc) {
+    try { window.localStorage.setItem(WS_PREFS_LOCAL_KEY, JSON.stringify(doc)); } catch { /* advisory */ }
+  }
+
+  /** One warning per page at most, and only for a real degradation. */
+  let wsRowsWarned = false;
+  function wsRowsWarn(message, error) {
+    if (wsRowsWarned) return;
+    wsRowsWarned = true;
+    try { console.warn("dsh-lookout: " + message, error); } catch { /* no console */ }
+  }
+
+  /** The table's row list: live workspaces first, the stored ids when the host list is unavailable. */
+  function wsRowsTableRows(prefs, items) {
+    const doc = wsRowsNormalizeDoc(prefs);
+    const rows = [];
+    const seen = new Set();
+    const roots = wsPinRootIds(items);
+    if (Array.isArray(items)) {
+      for (const item of items) {
+        if (item === null || typeof item !== "object") continue;
+        const id = typeof item.workspaceId === "string" ? item.workspaceId : (typeof item.id === "string" ? item.id : "");
+        if (!wsRowsValidId(id) || seen.has(id)) continue;
+        seen.add(id);
+        const title = typeof item.title === "string" && item.title.trim() !== ""
+          ? item.title
+          : (typeof item.name === "string" && item.name.trim() !== "" ? item.name : id);
+        rows.push({
+          id,
+          name: title,
+          child: items.length > 0 && !roots.has(id),
+          entry: doc.workspaces[id] !== undefined ? doc.workspaces[id] : wsRowsNormalizeEntry(null)
+        });
+      }
+    }
+    if (rows.length === 0) {
+      for (const id of Object.keys(doc.workspaces)) rows.push({ id, name: id, child: false, entry: doc.workspaces[id] });
+    }
+    return rows;
+  }
+
+  function wsRowsKnownIds(items) {
+    const ids = [];
+    if (!Array.isArray(items)) return ids;
+    for (const item of items) {
+      if (item === null || typeof item !== "object") continue;
+      const id = typeof item.workspaceId === "string" ? item.workspaceId : (typeof item.id === "string" ? item.id : "");
+      if (wsRowsValidId(id)) ids.push(id);
+    }
+    return ids;
+  }
+
+  /** Path spelling used by the shipped workspace list: forward slashes, no trailing slash. */
+  function wsPinNormalizePath(value) {
+    if (typeof value !== "string") return "";
+    const trimmed = value.trim();
+    if (trimmed === "") return "";
+    const normalized = trimmed.replace(/\\/g, "/").replace(/\/+$/, "");
+    return normalized === "" ? "/" : normalized;
+  }
+
+  /**
+   * Workspaces that are roots rather than children: a path sitting under
+   * another registered workspace's path is a child and never pins on its own.
+   * An item without a usable path counts as a root (topology unknown, never
+   * guess); a stored pin on a child is ignored but never deleted.
+   * @returns Set of root workspace ids.
+   */
+  function wsPinRootIds(items) {
+    const entries = [];
+    if (Array.isArray(items)) {
+      for (const item of items) {
+        if (item === null || typeof item !== "object") continue;
+        const id = typeof item.workspaceId === "string" && item.workspaceId !== ""
+          ? item.workspaceId
+          : (typeof item.id === "string" ? item.id : "");
+        if (!wsRowsValidId(id)) continue;
+        entries.push({ id, path: wsPinNormalizePath(item.path) });
+      }
+    }
+    const roots = new Set();
+    for (const entry of entries) {
+      let child = false;
+      if (entry.path !== "") {
+        for (const parent of entries) {
+          if (parent === entry || parent.path === "") continue;
+          const under = parent.path === "/"
+            ? entry.path.charAt(0) === "/"
+            : entry.path.indexOf(parent.path + "/") === 0;
+          if (under) { child = true; break; }
+        }
+      }
+      if (!child) roots.add(entry.id);
+    }
+    return roots;
+  }
+
+  /**
+   * The minimum moves that put every pinned ROOT workspace at the front while
+   * keeping their current relative order. Returns null when the list already
+   * satisfies that, so a settled list makes ZERO insertBefore calls.
+   *
+   * Only the pinned workspaces that are not already in the correct prefix move;
+   * each is inserted before the same first unpinned workspace, which keeps the
+   * moved block in order without reading the list between awaits.
+   * @param prefsDoc - the preference document.
+   * @param items - the live workspace list (workspaceId / path / title).
+   * @returns { steps, key } or null.
+   */
+  function wsPinPlan(prefsDoc, items) {
+    const doc = wsRowsNormalizeDoc(prefsDoc);
+    const ids = [];
+    if (Array.isArray(items)) {
+      for (const item of items) {
+        if (item === null || typeof item !== "object") continue;
+        const id = typeof item.workspaceId === "string" && item.workspaceId !== ""
+          ? item.workspaceId
+          : (typeof item.id === "string" ? item.id : "");
+        if (wsRowsValidId(id) && ids.indexOf(id) < 0) ids.push(id);
+      }
+    }
+    if (ids.length === 0) return null;
+    const roots = wsPinRootIds(items);
+    const pinned = [];
+    for (const id of ids) {
+      const entry = doc.workspaces[id];
+      if (entry === undefined || entry.pinned !== true) continue;
+      if (!roots.has(id)) continue; // a child's historical pin is ignored, not cleared
+      pinned.push(id);
+    }
+    if (pinned.length === 0) return null;
+    let placed = 0;
+    while (placed < pinned.length && ids[placed] === pinned[placed]) placed++;
+    if (placed >= pinned.length) return null;
+    // ids[placed] is non-pinned by construction, so it is the stable anchor.
+    const before = ids[placed];
+    const steps = [];
+    for (let index = placed; index < pinned.length; index++) steps.push({ id: pinned[index], before });
+    return { steps, key: steps.map((step) => step.id + ">" + step.before).join("|") };
+  }
+
+  /** Escape a value for a double-quoted CSS string; control characters are quoted numerically. */
+  function wsRowsCssString(value) {
+    let out = "";
+    for (const character of String(value)) {
+      const code = character.codePointAt(0);
+      if (character === '"' || character === "\\") out += "\\" + character;
+      else if (code < 0x20 || code === 0x7f) out += "\\" + code.toString(16) + " ";
+      else out += character;
+    }
+    return out;
+  }
+
+  function wsRowsStart(ctx, require) {
+    let controller = null;
+    try {
+      controller = wsRowsInstall(ctx, require);
+    } catch (error) {
+      wsRowsWarn("工作区标签初始化失败,已跳过(不影响宿主):", error);
+      return;
+    }
+    try {
+      if (ctx !== null && ctx !== undefined && typeof ctx.effect === "function") {
+        ctx.effect(() => () => { try { controller.dispose(); } catch { /* best effort */ } }, "dsh-lookout: workspace rows");
+      } else if (ctx !== null && ctx !== undefined && typeof ctx.on === "function") {
+        ctx.on("dispose", () => { try { controller.dispose(); } catch { /* best effort */ } });
+      }
+    } catch (error) {
+      wsRowsWarn("工作区标签挂到生命周期失败:", error);
+    }
+  }
+
+  /**
+   * Install tags + hiding + the settings table, and return the controller.
+   * Every DOM lookup is guarded: a host upgrade can only cost the tags.
+   * @returns {object} controller: dispose / snapshot / subscribe / updateEntry /
+   * cleanupMissing / paintNow / domWorkspaceIds / setEnabled / isEnabled.
+   */
+  function wsRowsInstall(ctx, require) {
+    let disposed = false;
+    let enabled = wsRowsReadFlag(WS_ROWS_ENABLED_KEY, true);
+    let prefs = wsRowsReadLocalPrefs();
+    let localDirty = false;
+    let translate = wsRowsFallbackText;
+    let observer = null;
+    let observerRoot = null;
+    let retryTimer = 0;
+    let scanTimer = 0;
+    let saveTimer = 0;
+    let painting = false;
+    let paintedAt = 0;
+    let failures = 0;
+    let givenUp = false;
+    let saveFailedOnce = false;
+    let toast = null;
+    let toastTimer = 0;
+    const prefListeners = new Set();
+    // ---- pinning --------------------------------------------------------
+    // The workspace service arrives late (ctx.inject) and is optional: tags,
+    // hiding and the preferences table never wait for it.
+    let pinService = null;
+    let pinUnsubscribe = null;
+    let pinTimer = 0;
+    let pinRunning = false;
+    let pinDirty = false;
+    let pinWarned = false;
+    let pinFailedOnce = false;
+    let pinFailures = 0;
+    let pinSuspended = false;
+    let pinCooldownUntil = 0;
+
+    // ---- locale ---------------------------------------------------------
+    try {
+      const locale = ctx !== null && ctx !== undefined ? ctx.locale : null;
+      if (locale !== null && locale !== undefined && typeof locale.register === "function") {
+        const register = () => locale.register(WS_ROWS_NS, { zh: WS_ROWS_ZH, en: WS_ROWS_EN });
+        if (typeof ctx.effect === "function") ctx.effect(register, "dsh-lookout: workspace rows dictionaries");
+        else register();
+      }
+      if (locale !== null && locale !== undefined && typeof locale.bind === "function") {
+        const bound = locale.bind(WS_ROWS_NS);
+        translate = (key, params) => {
+          let text = key;
+          try { text = bound(key, params); } catch { text = key; }
+          return typeof text === "string" && text !== key ? text : wsRowsFallbackText(key, params);
+        };
+      }
+    } catch (error) { /* Chinese fallback is already in place */ }
+
+    const api = {
+      snapshot: snapshot,
+      subscribe: subscribePrefs,
+      updateEntry: updateEntry,
+      cleanupMissing: cleanupMissing,
+      paintNow: paint,
+      pinNow: pinNow,
+      domWorkspaceIds: domWorkspaceIds,
+      setEnabled: setEnabled,
+      isEnabled: () => enabled === true
+    };
+
+    // ---- settings page --------------------------------------------------
+    // Own section (order 56, right after the file-row menu at 55): the three
+    // bundled parts own their pages and are byte-locked.
+    try {
+      const React = require("react");
+      if (React !== null && typeof React.createElement === "function" && typeof React.useState === "function") {
+        function WorkspaceRowsSection(props) {
+          const label = props !== null && props !== undefined && typeof props.t === "function" ? props.t : translate;
+          const [view, setView] = React.useState(() => prefs);
+          const [on, setOn] = React.useState(() => enabled);
+          const [notice, setNotice] = React.useState("");
+          React.useEffect(() => subscribePrefs(setView), []);
+          const useWorkspaces = props !== null && props !== undefined ? props.useWorkspaces : null;
+          const snapshotState = typeof useWorkspaces === "function" ? useWorkspaces((state) => state) : undefined;
+          const items = snapshotState !== null && typeof snapshotState === "object" && Array.isArray(snapshotState.items) ? snapshotState.items : [];
+          const rows = wsRowsTableRows(view, items);
+          const commit = (id, patch) => { updateEntry(id, patch); };
+          const onCleanup = () => {
+            const live = wsRowsKnownIds(items);
+            const ids = live.length > 0 ? live : domWorkspaceIds();
+            const removed = cleanupMissing(ids);
+            setNotice(removed > 0 ? label("cleaned", { n: removed }) : label("cleanNone"));
+          };
+          const header = React.createElement("thead", null,
+            React.createElement("tr", null,
+              ["colName", "colTag", "colColor", "colPin", "colHide"].map((key) =>
+                React.createElement("th", { key, style: WS_STYLE_TH }, label(key)))));
+          const body = React.createElement("tbody", null,
+            rows.map((row) => React.createElement("tr", { key: row.id, "data-lookout-ws-row": row.id },
+              React.createElement("td", { style: WS_STYLE_TD }, row.name),
+              React.createElement("td", { style: WS_STYLE_TD },
+                React.createElement("input", {
+                  "data-lookout-ws-field": "tag",
+                  "data-lookout-ws-id": row.id,
+                  type: "text",
+                  maxLength: WS_TAG_MAX,
+                  value: row.entry.tag,
+                  placeholder: label("tagPlaceholder"),
+                  style: { width: 96 },
+                  onChange: (event) => commit(row.id, { tag: event.target.value })
+                })),
+              React.createElement("td", { style: WS_STYLE_TD },
+                React.createElement("select", {
+                  "data-lookout-ws-field": "color",
+                  "data-lookout-ws-id": row.id,
+                  value: row.entry.color,
+                  onChange: (event) => commit(row.id, { color: event.target.value })
+                }, WS_COLORS.map((name) =>
+                  React.createElement("option", { key: name, value: name },
+                    label("color" + name.charAt(0).toUpperCase() + name.slice(1)))))),
+              React.createElement("td", { style: WS_STYLE_TD },
+                React.createElement("input", {
+                  "data-lookout-ws-field": "pinned",
+                  "data-lookout-ws-id": row.id,
+                  type: "checkbox",
+                  checked: row.entry.pinned === true,
+                  disabled: row.child === true,
+                  title: row.child === true ? label("pinChildHint") : undefined,
+                  onChange: (event) => commit(row.id, { pinned: event.target.checked === true })
+                })),
+              React.createElement("td", { style: WS_STYLE_TD },
+                React.createElement("input", {
+                  "data-lookout-ws-field": "hidden",
+                  "data-lookout-ws-id": row.id,
+                  type: "checkbox",
+                  checked: row.entry.hidden === true,
+                  onChange: (event) => commit(row.id, { hidden: event.target.checked === true })
+                })))));
+          return React.createElement("div", { "data-lookout-settings": "workspaces" },
+            React.createElement("div", { style: WS_STYLE_TITLE }, label("nav")),
+            rows.length === 0
+              ? React.createElement("div", { style: WS_STYLE_HINT }, label("empty"))
+              : React.createElement("table", { style: WS_STYLE_TABLE, "data-lookout-ws-table": "" }, header, body),
+            rows.some((row) => row.child === true)
+              ? React.createElement("div", { style: WS_STYLE_HINT }, label("pinChildHint"))
+              : null,
+            React.createElement("div", { style: WS_STYLE_ACTIONS },
+              React.createElement("button", {
+                type: "button",
+                "data-lookout-ws-cleanup": "",
+                onClick: onCleanup
+              }, label("cleanup")),
+              React.createElement("label", { style: WS_STYLE_TOGGLE },
+                React.createElement("input", {
+                  type: "checkbox",
+                  "data-lookout-ws-toggle": "",
+                  checked: on,
+                  onChange: (event) => {
+                    const next = event.target.checked === true;
+                    setOn(next);
+                    setEnabled(next);
+                  }
+                }),
+                React.createElement("span", null, label("toggleLabel")))),
+            notice !== "" ? React.createElement("div", { style: WS_STYLE_HINT }, notice) : null,
+            React.createElement("div", { style: WS_STYLE_HINT }, label("toggleHint")),
+            React.createElement("div", { style: WS_STYLE_HINT }, label("pinnedHint")));
+        }
+        const slots = ctx !== null && ctx !== undefined ? ctx.slots : null;
+        if (slots !== null && slots !== undefined && typeof slots.inject === "function" && typeof slots.register === "function") {
+          slots.inject("settings.section", () => slots.register({
+            name: "settings.section",
+            id: "lookout-workspaces",
+            order: 56,
+            label: () => translate("nav"),
+            locale: WS_ROWS_NS,
+            inject: () => ({ t: translate, wsRows: api })
+          }, (props) => React.createElement(WorkspaceRowsSection, Object.assign({}, props, {
+            t: props !== null && props !== undefined && typeof props.t === "function" ? props.t : translate,
+            wsRows: api
+          }))));
+        }
+      }
+    } catch (error) {
+      // Settings are optional; the tags and hiding are not.
+    }
+
+    // ---- styles ---------------------------------------------------------
+    function ensureStyleTag(key, css) {
+      try {
+        const existing = document.querySelector('style[data-plugin-css="' + key + '"]');
+        if (existing !== null && existing !== undefined) {
+          // A linked (hot-reloaded) client keeps its <style> tags alive. Refresh
+          // stale text so a new build's CSS actually reaches the page.
+          if (existing.textContent !== css) {
+            try { existing.textContent = css; } catch { /* tag gone */ }
+          }
+          return existing;
+        }
+        const tag = document.createElement("style");
+        tag.setAttribute("data-plugin", "dsh-lookout");
+        tag.setAttribute("data-plugin-css", key);
+        tag.textContent = css;
+        const head = document.head !== null && document.head !== undefined ? document.head : document.body;
+        if (head !== null && head !== undefined) head.appendChild(tag);
+        return tag;
+      } catch { return null; }
+    }
+
+    function ensureStaticStyle() {
+      ensureStyleTag(WS_STYLE_KEY, WS_ROWS_CSS);
+    }
+
+    function ensureHideStyleTag() {
+      return ensureStyleTag(WS_HIDE_STYLE_KEY, "");
+    }
+
+    // ---- DOM lookups ----------------------------------------------------
+    function container() {
+      try {
+        return document.querySelector(WS_CONTAINER_SELECTOR) || document.querySelector(WS_CONTAINER_FALLBACK) || null;
+      } catch { return null; }
+    }
+
+    function allRowNodes(root) {
+      try {
+        return Array.prototype.slice.call(root.querySelectorAll("[" + WS_ROW_KEY_ATTR + "]"));
+      } catch { return []; }
+    }
+
+    function workspaceRows(root) {
+      return allRowNodes(root).filter((node) => {
+        const key = node.getAttribute(WS_ROW_KEY_ATTR);
+        return typeof key === "string" && key.indexOf(WS_WORKSPACE_PREFIX) === 0;
+      });
+    }
+
+    function rowIdOf(row) {
+      const key = row.getAttribute(WS_ROW_KEY_ATTR);
+      if (typeof key !== "string" || key.indexOf(WS_WORKSPACE_PREFIX) !== 0) return null;
+      const id = key.slice(WS_WORKSPACE_PREFIX.length);
+      return wsRowsValidId(id) ? id : null;
+    }
+
+    function domWorkspaceIds() {
+      const root = container();
+      if (root === null) return [];
+      const ids = [];
+      for (const row of workspaceRows(root)) {
+        const id = rowIdOf(row);
+        if (id !== null) ids.push(id);
+      }
+      return ids;
+    }
+
+    /**
+     * The title element inside one workspace row.
+     *
+     * Primary match: the class token the shipped row gives its title
+     * (YDXeBa_title -> a token ending in "title"). Fallback: the only descendant
+     * span that holds text and no element children. Ambiguity yields null (a
+     * missing badge), never a badge on the wrong row.
+     */
+    function findTitleElement(row) {
+      let spans;
+      try { spans = Array.prototype.slice.call(row.querySelectorAll("span")); } catch { return null; }
+      for (const span of spans) {
+        const tokens = String(span.className === null || span.className === undefined ? "" : span.className).split(/\s+/);
+        for (const token of tokens) {
+          if (token !== "" && /(?:^|[_-])title$/i.test(token)) return span;
+        }
+      }
+      const holders = [];
+      for (const span of spans) {
+        const text = typeof span.textContent === "string" ? span.textContent.trim() : "";
+        if (text === "") continue;
+        let hasElementChild = false;
+        for (const child of span.children) {
+          if (child.tagName === "SPAN" || child.tagName === "DIV" || child.tagName === "BUTTON" || child.tagName === "SVG") {
+            hasElementChild = true;
+            break;
+          }
+        }
+        if (!hasElementChild) holders.push(span);
+      }
+      return holders.length === 1 ? holders[0] : null;
+    }
+
+    /**
+     * The direct child span that holds the row's hover actions: the "⋯" menu
+     * and the new-session button. The shipped row gives it a class token ending
+     * in "rowActions"; a row without one puts the tag at the row's end instead.
+     */
+    function findRowActions(row) {
+      let children;
+      try { children = Array.prototype.slice.call(row.children); } catch { return null; }
+      for (const child of children) {
+        if (child.tagName !== "SPAN") continue;
+        const tokens = String(child.className === null || child.className === undefined ? "" : child.className).split(/\s+/);
+        for (const token of tokens) {
+          if (token !== "" && /(?:^|[_-])rowActions$/i.test(token)) return child;
+        }
+      }
+      return null;
+    }
+
+    /**
+     * Where the badge goes: the workspace row itself (div.projectRow), as a
+     * direct child immediately before span.rowActions (or at the row's end when
+     * the host renders no actions). The title only has to exist: the badge no
+     * longer lives inside its flex column, so nothing has to be flipped to a row.
+     */
+    function findTagAnchor(row) {
+      return findTitleElement(row) === null ? null : row;
+    }
+
+    /** True when the badge already sits at its home: row end, left of rowActions. */
+    function badgeInPlace(row, badge, actions) {
+      let children;
+      try { children = Array.prototype.slice.call(row.children); } catch { return false; }
+      const badgeIndex = children.indexOf(badge);
+      if (badgeIndex < 0) return false;
+      if (actions === null || actions.parentNode !== row) return badgeIndex === children.length - 1;
+      return badgeIndex === children.indexOf(actions) - 1;
+    }
+
+    /** Insert or move the badge to its home: row end, but left of rowActions. */
+    function placeBadge(row, badge, actions) {
+      if (actions !== null && actions.parentNode === row) row.insertBefore(badge, actions);
+      else row.appendChild(badge);
+    }
+
+    function badgeIn(row, id) {
+      let nodes;
+      try { nodes = Array.prototype.slice.call(row.querySelectorAll("[" + WS_TAG_ATTR + "]")); } catch { return null; }
+      for (const node of nodes) if (node.getAttribute(WS_TAG_ATTR) === id) return node;
+      return null;
+    }
+
+    function createBadge(id, tag, color) {
+      const badge = document.createElement("span");
+      badge.className = "dsh-lookout-ws-tag";
+      badge.setAttribute(WS_TAG_ATTR, id);
+      badge.setAttribute("data-color", color);
+      badge.title = tag;
+      const dot = document.createElement("span");
+      dot.className = "dsh-lookout-ws-tag-dot";
+      dot.setAttribute("aria-hidden", "true");
+      const text = document.createElement("span");
+      text.className = "dsh-lookout-ws-tag-text";
+      text.setAttribute(WS_TAG_TEXT_ATTR, "");
+      text.textContent = tag;
+      badge.appendChild(dot);
+      badge.appendChild(text);
+      return badge;
+    }
+
+    function updateBadge(badge, tag, color) {
+      badge.setAttribute("data-color", color);
+      badge.title = tag;
+      for (const child of badge.children) {
+        if (child.getAttribute(WS_TAG_TEXT_ATTR) !== null && child.textContent !== tag) { child.textContent = tag; break; }
+      }
+    }
+
+    /**
+     * Reconcile every rendered workspace row against the preferences.
+     *
+     * The badge is row-level: it must be a direct child of the row, immediately
+     * before rowActions, pushed right by margin-left:auto. A badge left in the
+     * old title-anchored spot (inside span.projectText), elsewhere under the
+     * sidebar, or on the wrong side of the row is moved, never duplicated.
+     */
+    function syncBadges(root, rows) {
+      let placed = 0;
+      let missed = 0;
+      let wanted = 0;
+      const known = new Set();
+      for (const row of rows) {
+        const id = rowIdOf(row);
+        if (id === null) continue;
+        known.add(id);
+        const entry = prefs.workspaces[id];
+        const tag = entry !== undefined ? entry.tag : "";
+        if (tag === "") continue;
+        wanted++;
+        const anchor = findTagAnchor(row);
+        if (anchor === null) { missed++; continue; }
+        const actions = findRowActions(anchor);
+        let badge = badgeIn(anchor, id);
+        if (badge === null) {
+          // Migrate a badge an older version left outside this row.
+          try { badge = root.querySelector("[" + WS_TAG_ATTR + '="' + id + '"]'); } catch { badge = null; }
+        }
+        if (badge === null) placeBadge(anchor, createBadge(id, tag, entry.color), actions);
+        else {
+          if (!badgeInPlace(anchor, badge, actions)) placeBadge(anchor, badge, actions);
+          updateBadge(badge, tag, entry.color);
+        }
+        placed++;
+      }
+      let stale;
+      try { stale = Array.prototype.slice.call(root.querySelectorAll("[" + WS_TAG_ATTR + "]")); } catch { stale = []; }
+      for (const badge of stale) {
+        const id = badge.getAttribute(WS_TAG_ATTR);
+        const entry = id !== null ? prefs.workspaces[id] : undefined;
+        if (entry === undefined || entry.tag === "" || !known.has(id)) {
+          try { badge.remove(); } catch { /* gone */ }
+        }
+      }
+      return { placed, missed, wanted };
+    }
+
+    // ---- current-session protection ------------------------------------
+    /** The workspaces the official uiWorkspace service says hold the open session. */
+    function officialCurrentWorkspaceIds() {
+      const ids = new Set();
+      try {
+        const service = ctx !== null && ctx !== undefined && typeof ctx.get === "function" ? ctx.get("uiWorkspace") : null;
+        if (service === null || service === undefined) return ids;
+        const selection = service.selection !== null && service.selection !== undefined && typeof service.selection.getSnapshot === "function"
+          ? service.selection.getSnapshot()
+          : null;
+        const sessionId = selection !== null && typeof selection === "object" ? selection.sessionId : undefined;
+        if (typeof sessionId !== "string" || sessionId === "") return ids;
+        const list = service.workspaces !== null && service.workspaces !== undefined && service.workspaces.list !== null && service.workspaces.list !== undefined
+          ? service.workspaces.list.getSnapshot()
+          : null;
+        const items = list !== null && typeof list === "object" && Array.isArray(list.items) ? list.items : [];
+        let current = null;
+        for (const item of items) {
+          if (item === null || typeof item !== "object") continue;
+          if (!Array.isArray(item.sessionIds) || item.sessionIds.indexOf(sessionId) < 0) continue;
+          if (typeof item.workspaceId === "string" && item.workspaceId !== "") { current = item; break; }
+        }
+        if (current === null) return ids;
+        ids.add(current.workspaceId);
+        const normalizePath = (value) => String(value).replace(/\\/g, "/").replace(/\/+$/, "");
+        const currentPath = typeof current.path === "string" ? normalizePath(current.path) : "";
+        if (currentPath !== "") {
+          for (const item of items) {
+            if (item === null || typeof item !== "object") continue;
+            if (typeof item.workspaceId !== "string" || item.workspaceId === current.workspaceId) continue;
+            const candidate = typeof item.path === "string" ? normalizePath(item.path) : "";
+            if (candidate !== "" && currentPath.indexOf(candidate + "/") === 0) ids.add(item.workspaceId);
+          }
+        }
+      } catch { /* no service: the DOM signals below still protect */ }
+      return ids;
+    }
+
+    function workspaceIdOfElement(element) {
+      const key = element.getAttribute(WS_ROW_KEY_ATTR);
+      if (typeof key !== "string" || key.indexOf(WS_WORKSPACE_PREFIX) !== 0) return null;
+      const id = key.slice(WS_WORKSPACE_PREFIX.length);
+      if (id === "") return "";
+      return wsRowsValidId(id) ? id : null;
+    }
+
+    /**
+     * The workspace this group wrapper owns.
+     *
+     * HoverCard renders its anchor inside a wrapper <span> (the shipped row is a
+     * direct child of that span), so the keyed row is either a direct child of
+     * the group wrapper or one level below it. One level only: nested child
+     * workspaces live under div[role="group"], never as a direct grandchild.
+     */
+    function directWorkspaceChildId(element) {
+      let children;
+      try { children = element.children; } catch { return null; }
+      if (children === null || children === undefined) return null;
+      for (const child of children) {
+        const direct = workspaceIdOfElement(child);
+        if (direct !== null) return direct;
+        let inner;
+        try { inner = child.children; } catch { inner = null; }
+        if (inner === null || inner === undefined) continue;
+        for (const nested of inner) {
+          const id = workspaceIdOfElement(nested);
+          if (id !== null) return id;
+        }
+      }
+      return null;
+    }
+
+    /** Every workspace group that contains this node, nearest first. */
+    function ancestorWorkspaceIds(node, root) {
+      const ids = [];
+      let element = node.parentElement;
+      while (element !== null && element !== undefined && element !== root) {
+        const id = directWorkspaceChildId(element);
+        if (id !== null) ids.push(id);
+        element = element.parentElement;
+      }
+      return ids;
+    }
+
+    /** The shipped row marks the group holding the open session with a *folderActive class. */
+    function marksCurrentGroup(row) {
+      let nodes;
+      try { nodes = Array.prototype.slice.call(row.querySelectorAll("span,div")); } catch { return false; }
+      for (const node of nodes) {
+        const tokens = String(node.className === null || node.className === undefined ? "" : node.className).split(/\s+/);
+        for (const token of tokens) if (token !== "" && /folderActive$/i.test(token)) return true;
+      }
+      return false;
+    }
+
+    /**
+     * Workspace ids whose group must never be hidden.
+     *
+     * Three independent signals, unioned: the official service, the selected
+     * session row (aria-selected / aria-current), and the folderActive mark that
+     * also covers a COLLAPSED group whose session rows are not rendered. If a
+     * selected session cannot be mapped to any workspace group, hide nothing at
+     * all (blockAll): a row the person is reading must never disappear.
+     */
+    function protectedIds(root) {
+      const ids = new Set();
+      let blockAll = false;
+      for (const id of officialCurrentWorkspaceIds()) ids.add(id);
+      for (const node of allRowNodes(root)) {
+        const key = node.getAttribute(WS_ROW_KEY_ATTR);
+        if (typeof key !== "string" || key.indexOf(WS_SESSION_PREFIX) !== 0) continue;
+        const selected = node.getAttribute("aria-selected") === "true" || node.getAttribute("aria-current") === "true";
+        if (!selected) continue;
+        // "" is the ungrouped bucket's key (data-row-key="workspace:"): it counts as
+        // "inside a group, but not inside any real workspace", so hiding the OTHER
+        // workspaces is still safe. Only a selected session with no group wrapper at
+        // all makes us hide nothing.
+        const groupIds = ancestorWorkspaceIds(node, root);
+        if (groupIds.length === 0) blockAll = true;
+        for (const id of groupIds) if (id !== "") ids.add(id);
+      }
+      for (const row of workspaceRows(root)) {
+        const id = rowIdOf(row);
+        if (id !== null && marksCurrentGroup(row)) ids.add(id);
+      }
+      return { ids, blockAll };
+    }
+
+    // ---- hiding ---------------------------------------------------------
+    function renderHide(root) {
+      const style = ensureHideStyleTag();
+      let hidden = 0;
+      let rules = [];
+      try {
+        const guard = protectedIds(root);
+        for (const id of Object.keys(prefs.workspaces)) {
+          if (prefs.workspaces[id].hidden !== true) continue;
+          hidden++;
+          if (guard.blockAll || guard.ids.has(id)) continue;
+          if (!WS_ID_PATTERN.test(id)) continue;
+          // Three shapes, all scoped to ONE or TWO levels above the keyed row, so
+          // an ancestor group is never matched by accident:
+          //   div > row                       (ungrouped bucket; no hover wrapper)
+          //   div > span > row                (the shipped HoverCard wrapper)
+          //   .*groupSection variants         (belt and braces for the two shapes)
+          const key = wsRowsCssString(WS_WORKSPACE_PREFIX + id);
+          const attr = "[" + WS_ROW_KEY_ATTR + '="' + key + '"]';
+          rules.push(
+            "div:has(>" + attr + ")," +
+            "div:has(>span>" + attr + ")," +
+            'div[class*="groupSection"]:has(>' + attr + ")," +
+            'div[class*="groupSection"]:has(>span>' + attr + ")" +
+            "{display:none!important;}"
+          );
+        }
+      } catch (error) {
+        rules = [];
+        wsRowsWarn("隐藏工作区样式生成失败,已跳过(不影响侧栏):", error);
+      }
+      if (style !== null && style !== undefined) {
+        const text = rules.length === 0 ? "" : WS_HIDE_CSS_HEADER + "\n" + rules.join("\n");
+        try { if (style.textContent !== text) style.textContent = text; } catch { /* gone */ }
+      }
+      return { rules: rules.length, wanted: hidden };
+    }
+
+    // ---- paint ----------------------------------------------------------
+    function paint() {
+      if (disposed || !enabled || givenUp) return;
+      const root = container();
+      if (root === null) return;
+      let rows;
+      try { rows = workspaceRows(root); } catch (error) { noteFailure(error); return; }
+      // Sidebar in rail mode, an empty list, or a build without workspace rows:
+      // nothing to place is NOT a failure.
+      if (rows.length === 0) return;
+      painting = true;
+      let placed = 0;
+      let missed = 0;
+      let wanted = 0;
+      let failure = null;
+      try {
+        const synced = syncBadges(root, rows);
+        placed += synced.placed;
+        missed += synced.missed;
+        wanted += synced.wanted;
+        const hide = renderHide(root);
+        placed += hide.rules;
+        wanted += hide.wanted;
+      } catch (error) {
+        failure = error;
+      } finally {
+        painting = false;
+        paintedAt = Date.now();
+      }
+      if (placed > 0) failures = 0;
+      else if (failure !== null) noteFailure(failure);
+      else if (wanted > 0 && missed > 0) noteFailure("这一轮没有任何工作区行能贴上标签: " + missed + " 个");
+    }
+
+    function noteFailure(why) {
+      if (givenUp || disposed) return;
+      failures++;
+      if (failures === 1) wsRowsWarn("工作区标签注入失败,已降级(不影响侧栏):", why);
+      if (failures < WS_MAX_FAILURES) return;
+      givenUp = true;
+      stopWatching();
+      if (!wsRowsReadFlag(WS_ROWS_DISMISSED_KEY, false)) showToast(translate("givingUp"), true);
+    }
+
+    // ---- watchers -------------------------------------------------------
+    function ensureObserver() {
+      if (disposed || !enabled || givenUp) return;
+      if (typeof window.MutationObserver !== "function") return;
+      const root = container();
+      if (root === null) return;
+      if (observer !== null && observerRoot === root) return;
+      if (observer !== null) { try { observer.disconnect(); } catch { /* gone */ } observer = null; }
+      observer = new window.MutationObserver(onMutations);
+      observerRoot = root;
+      observer.observe(root, { childList: true, subtree: true });
+    }
+
+    function onMutations() {
+      if (disposed || !enabled || givenUp) return;
+      try {
+        if (painting) return;
+        // Ignore only the settle window right after our own paint. Anything later
+        // must reconcile, or a host re-render that took a badge leaves it gone.
+        if (Date.now() - paintedAt < WS_QUIET_MS) return;
+        if (container() === null) { scheduleRetry(); return; }
+        scheduleScan();
+      } catch (error) { noteFailure(error); }
+    }
+
+    function scheduleScan() {
+      if (disposed || !enabled || givenUp) return;
+      if (scanTimer !== 0) { try { window.clearTimeout(scanTimer); } catch { /* gone */ } }
+      scanTimer = window.setTimeout(() => { scanTimer = 0; paint(); }, WS_SCAN_DEBOUNCE);
+    }
+
+    function scheduleRetry() {
+      if (disposed || !enabled || givenUp) return;
+      if (retryTimer !== 0) return;
+      retryTimer = window.setInterval(attachContainer, 1000);
+    }
+
+    function attachContainer() {
+      if (disposed || !enabled || givenUp) return true;
+      const root = container();
+      if (root === null) return false;
+      ensureObserver();
+      paint();
+      if (observer !== null && retryTimer !== 0) { try { window.clearInterval(retryTimer); } catch { /* gone */ } retryTimer = 0; }
+      return true;
+    }
+
+    function startWatching() {
+      if (disposed || !enabled || givenUp) return;
+      ensureObserver();
+      if (container() !== null) paint();
+      else scheduleRetry();
+      // No MutationObserver in this build: the 1s retry is the only updater left.
+      if (observer === null && retryTimer === 0) scheduleRetry();
+    }
+
+    function stopWatching() {
+      if (observer !== null) { try { observer.disconnect(); } catch { /* gone */ } observer = null; }
+      observerRoot = null;
+      if (retryTimer !== 0) { try { window.clearInterval(retryTimer); } catch { /* gone */ } retryTimer = 0; }
+      if (scanTimer !== 0) { try { window.clearTimeout(scanTimer); } catch { /* gone */ } scanTimer = 0; }
+      painting = false;
+    }
+
+    // ---- preferences ----------------------------------------------------
+    function snapshot() {
+      return wsRowsNormalizeDoc(prefs);
+    }
+
+    function subscribePrefs(listener) {
+      if (typeof listener !== "function") return () => {};
+      prefListeners.add(listener);
+      return () => { prefListeners.delete(listener); };
+    }
+
+    function notifyPrefs() {
+      for (const listener of prefListeners) {
+        try { listener(snapshot()); } catch { /* a listener must not break the paint */ }
+      }
+    }
+
+    function commitPrefs(next) {
+      prefs = wsRowsNormalizeDoc(next);
+      localDirty = true;
+      wsRowsWriteLocalPrefs(prefs);
+      notifyPrefs();
+      paint();
+      scheduleSave();
+    }
+
+    function updateEntry(id, patch) {
+      if (disposed || !wsRowsValidId(id)) return null;
+      if (id === "__proto__" || id === "constructor" || id === "prototype") return null;
+      const base = prefs.workspaces[id] !== undefined ? prefs.workspaces[id] : wsRowsNormalizeEntry(null);
+      const next = {
+        tag: base.tag,
+        color: base.color,
+        pinned: base.pinned,
+        hidden: base.hidden,
+        pinAnchor: base.pinAnchor
+      };
+      const wasPinned = base.pinned === true;
+      let pinOn = false;
+      let restoreAnchor = null;
+      if (patch !== null && typeof patch === "object") {
+        if (Object.hasOwn(patch, "tag")) next.tag = wsRowsNormalizeTag(patch.tag);
+        if (Object.hasOwn(patch, "color")) next.color = wsRowsNormalizeColor(patch.color);
+        if (Object.hasOwn(patch, "pinned")) {
+          next.pinned = patch.pinned === true;
+          // Pin: remember who this workspace sat behind, then replay to the top.
+          // Unpin: restore behind that anchor and clear it (a missing anchor
+          // leaves the row where it is).
+          if (next.pinned === true && !wasPinned) {
+            pinOn = true;
+            next.pinAnchor = capturePinAnchor(id);
+          } else if (next.pinned !== true && wasPinned) {
+            restoreAnchor = base.pinAnchor;
+            next.pinAnchor = null;
+          }
+        }
+        if (Object.hasOwn(patch, "hidden")) next.hidden = patch.hidden === true;
+        if (Object.hasOwn(patch, "pinAnchor")) next.pinAnchor = typeof patch.pinAnchor === "string" ? patch.pinAnchor : null;
+      }
+      const entry = wsRowsNormalizeEntry(next);
+      const workspaces = Object.assign({}, prefs.workspaces);
+      if (wsRowsIsDefaultEntry(entry)) delete workspaces[id];
+      else workspaces[id] = entry;
+      commitPrefs({ version: 1, workspaces });
+      if (pinOn) requestPinReplay(0);
+      else if (restoreAnchor !== null) restorePinAnchor(id, restoreAnchor);
+      return entry;
+    }
+
+    // ---- pinning --------------------------------------------------------
+    /**
+     * Bind the Client Workspace service late and non-blockingly. A host
+     * without `workspaces` (or an older one whose ctx cannot inject) keeps
+     * tags, hiding and the preferences table exactly as they were.
+     */
+    function bindWorkspaceService() {
+      if (disposed) return;
+      const inject = ctx !== null && ctx !== undefined && typeof ctx.inject === "function" ? ctx.inject : null;
+      if (inject === null) return;
+      try {
+        inject(["workspaces"], (scope) => {
+          if (disposed) return;
+          let service = null;
+          try { service = scope !== null && scope !== undefined ? scope.workspaces : null; } catch { service = null; }
+          if (service === null || typeof service !== "object" || typeof service.insertBefore !== "function") return;
+          pinService = service;
+          try {
+            const source = service.list;
+            if (source !== null && source !== undefined && typeof source.subscribe === "function") {
+              pinUnsubscribe = source.subscribe(onWorkspaceListChanged);
+            }
+          } catch (error) { notePinWarn("订阅工作区列表失败:", error); }
+          schedulePinReplay(0);
+        });
+      } catch (error) {
+        notePinWarn("工作区置顶初始化失败(不影响标签和隐藏):", error);
+      }
+    }
+
+    function pinItems() {
+      try {
+        const source = pinService !== null && pinService !== undefined ? pinService.list : null;
+        if (source === null || source === undefined || typeof source.getSnapshot !== "function") return [];
+        const snapshot = source.getSnapshot();
+        return snapshot !== null && typeof snapshot === "object" && Array.isArray(snapshot.items) ? snapshot.items : [];
+      } catch { return []; }
+    }
+
+    function pinWorkspaceIds() {
+      const ids = [];
+      for (const item of pinItems()) {
+        if (item === null || typeof item !== "object") continue;
+        const id = typeof item.workspaceId === "string" && item.workspaceId !== ""
+          ? item.workspaceId
+          : (typeof item.id === "string" ? item.id : "");
+        if (wsRowsValidId(id) && ids.indexOf(id) < 0) ids.push(id);
+      }
+      return ids;
+    }
+
+    /** One warning per page: a missing service is a degradation, never an error. */
+    function notePinWarn(message, error) {
+      if (pinWarned) return;
+      pinWarned = true;
+      try { console.warn("dsh-lookout: " + message, error); } catch { /* no console */ }
+    }
+
+    /** One toast and one warning per page; a broken reorder must never repeat. */
+    function notePinFailure(error) {
+      pinFailures++;
+      if (pinFailures >= WS_PIN_MAX_FAILURES) pinSuspended = true;
+      else pinCooldownUntil = Date.now() + WS_PIN_RETRY_MS;
+      if (pinFailedOnce) return;
+      pinFailedOnce = true;
+      notePinWarn("工作区置顶失败(只提示一次):", error);
+      try { showToast(translate("pinFailed"), false); } catch { /* best effort */ }
+    }
+
+    function onWorkspaceListChanged() {
+      if (disposed) return;
+      // Our own moves change the list too: fold them into the running replay
+      // instead of starting another one.
+      if (pinRunning) { pinDirty = true; return; }
+      schedulePinReplay(WS_PIN_DEBOUNCE);
+    }
+
+    function schedulePinReplay(delay) {
+      if (disposed || pinService === null || pinSuspended) return;
+      if (pinTimer !== 0) return;
+      let wait = typeof delay === "number" && delay > 0 ? delay : 0;
+      const now = Date.now();
+      if (pinCooldownUntil > now) wait = Math.max(wait, pinCooldownUntil - now);
+      pinTimer = window.setTimeout(() => { pinTimer = 0; void pinNow(); }, wait);
+    }
+
+    /** An explicit user action clears the failure backoff and replays immediately. */
+    function requestPinReplay(delay) {
+      pinSuspended = false;
+      pinFailures = 0;
+      pinCooldownUntil = 0;
+      if (pinTimer !== 0) { try { window.clearTimeout(pinTimer); } catch { /* gone */ } pinTimer = 0; }
+      schedulePinReplay(delay);
+    }
+
+    /**
+     * Replay pinned workspaces to the front. Zero insertBefore calls when the
+     * order already fits; otherwise the smallest set of moves (one per pinned
+     * workspace that is not already in the correct prefix). Re-entry from our
+     * own moves is folded into pinDirty, and the identical-plan guard plus the
+     * round/move caps stop a host that accepts a move without performing it.
+     * @returns a promise settled when this replay finished.
+     */
+    function pinNow() {
+      if (disposed || pinSuspended) return Promise.resolve();
+      const service = pinService;
+      if (service === null || typeof service.insertBefore !== "function") return Promise.resolve();
+      if (pinRunning) { pinDirty = true; return Promise.resolve(); }
+      pinRunning = true;
+      pinDirty = false;
+      return (async () => {
+        let moves = 0;
+        let lastKey = null;
+        let stalled = false;
+        try {
+          for (let round = 0; round < WS_PIN_MAX_ROUNDS; round++) {
+            if (disposed) break;
+            const plan = wsPinPlan(prefs, pinItems());
+            if (plan === null) { pinDirty = false; break; }
+            if (plan.key === lastKey) { stalled = true; break; }
+            lastKey = plan.key;
+            pinDirty = false;
+            let stop = false;
+            for (const step of plan.steps) {
+              if (disposed || moves >= WS_PIN_MAX_MOVES) { stop = true; break; }
+              try {
+                await service.insertBefore(step.id, step.before);
+                moves++;
+              } catch (error) {
+                notePinFailure(error);
+                stop = true;
+                break;
+              }
+            }
+            if (stop) break;
+          }
+        } finally {
+          pinRunning = false;
+          const pending = pinDirty;
+          pinDirty = false;
+          if (pending && !stalled && !disposed) schedulePinReplay(WS_PIN_DEBOUNCE);
+        }
+      })();
+    }
+
+    /** The workspace right before this one at pin time; null when it was first. */
+    function capturePinAnchor(id) {
+      if (pinService === null) { notePinWarn(translate("pinUnavailable")); return null; }
+      const ids = pinWorkspaceIds();
+      const at = ids.indexOf(id);
+      return at > 0 ? ids[at - 1] : null;
+    }
+
+    /**
+     * Unpin restore: move the workspace back behind its recorded anchor. An
+     * anchor that is gone (or null) leaves the workspace where it is, so a
+     * deletion elsewhere never makes the list jump.
+     */
+    function restorePinAnchor(id, anchor) {
+      if (disposed || pinService === null || typeof anchor !== "string" || anchor === "") return;
+      const ids = pinWorkspaceIds();
+      if (ids.indexOf(id) < 0) return;
+      const at = ids.indexOf(anchor);
+      if (at < 0) return; // anchor gone: stay put (the caller already cleared it)
+      const before = at + 1 < ids.length ? ids[at + 1] : undefined;
+      if (before === id) return; // already right behind the anchor: zero calls
+      try {
+        const result = pinService.insertBefore(id, before);
+        if (result !== null && typeof result === "object" && typeof result.then === "function") {
+          result.catch((error) => notePinFailure(error));
+        }
+      } catch (error) { notePinFailure(error); }
+    }
+
+    function cleanupMissing(ids) {
+      if (disposed) return 0;
+      const list = Array.isArray(ids) ? ids : [];
+      const known = new Set();
+      for (const id of list) if (wsRowsValidId(id)) known.add(id);
+      // Without a live list the button must not wipe every preference.
+      if (known.size === 0) return 0;
+      const workspaces = {};
+      let removed = 0;
+      for (const [id, entry] of Object.entries(prefs.workspaces)) {
+        if (known.has(id)) workspaces[id] = entry;
+        else removed++;
+      }
+      if (removed === 0) return 0;
+      commitPrefs({ version: 1, workspaces });
+      return removed;
+    }
+
+    function rpcFace() {
+      try {
+        if (ctx === null || ctx === undefined) return null;
+        let connection = ctx.connection;
+        if (connection === null || connection === undefined) {
+          connection = typeof ctx.get === "function" ? ctx.get("connection") : null;
+        }
+        const face = connection !== null && connection !== undefined ? connection.rpc : null;
+        return face !== null && face !== undefined && typeof face.call === "function" ? face : null;
+      } catch { return null; }
+    }
+
+    /** Startup pull: adopt the Host document, or keep the local mirror when RPC is unavailable. */
+    function loadFromHost() {
+      if (disposed) return;
+      const face = rpcFace();
+      if (face === null) return;
+      try {
+        face.call("/api", "iconCustom/getWorkspacePrefs", { args: {} }).then((response) => {
+          if (disposed) return;
+          if (response === null || typeof response !== "object" || response.ok !== true) return;
+          // A local edit that happened while the pull was in flight wins; push it.
+          if (localDirty) { scheduleSave(); return; }
+          prefs = wsRowsNormalizeDoc(response.value);
+          wsRowsWriteLocalPrefs(prefs);
+          notifyPrefs();
+          paint();
+        }).catch(() => { /* keep the local mirror */ });
+      } catch { /* keep the local mirror */ }
+    }
+
+    function scheduleSave() {
+      if (disposed) return;
+      if (saveTimer !== 0) { try { window.clearTimeout(saveTimer); } catch { /* gone */ } }
+      saveTimer = window.setTimeout(saveNow, WS_SAVE_DEBOUNCE);
+    }
+
+    function saveNow() {
+      saveTimer = 0;
+      if (disposed) return;
+      const face = rpcFace();
+      // No RPC: the localStorage mirror is the documented fallback, not an error.
+      if (face === null) return;
+      const request = snapshot();
+      try {
+        face.call("/api", "iconCustom/setWorkspacePrefs", { args: { request } }).then((response) => {
+          if (disposed) return;
+          if (response === null || typeof response !== "object" || response.ok !== true) { noteSaveFailure(response); return; }
+          localDirty = false;
+        }).catch(noteSaveFailure);
+      } catch (error) { noteSaveFailure(error); }
+    }
+
+    /** Saved once per page: a broken Host must not turn every keystroke into a toast. */
+    function noteSaveFailure(why) {
+      if (saveFailedOnce) return;
+      saveFailedOnce = true;
+      try { console.warn("dsh-lookout: 工作区偏好保存失败(只提示一次):", why); } catch { /* no console */ }
+      showToast(translate("saveFailed"), false);
+    }
+
+    // ---- switch ---------------------------------------------------------
+    function setEnabled(next) {
+      const on = next === true;
+      enabled = on;
+      wsRowsWriteFlag(WS_ROWS_ENABLED_KEY, on);
+      if (disposed) return;
+      if (!on) {
+        stopWatching();
+        hideToast();
+        removeBadges();
+        const style = ensureHideStyleTag();
+        if (style !== null && style !== undefined) { try { style.textContent = ""; } catch { /* gone */ } }
+        return;
+      }
+      givenUp = false;
+      failures = 0;
+      hideToast();
+      startWatching();
+      requestPinReplay(0);
+    }
+
+    function removeBadges() {
+      try { document.querySelectorAll("[" + WS_TAG_ATTR + "]").forEach((node) => { try { node.remove(); } catch { /* gone */ } }); } catch { /* gone */ }
+    }
+
+    // ---- toast ----------------------------------------------------------
+    function showToast(message, dismissable) {
+      if (disposed) return;
+      if (document.body === null || document.body === undefined) return;
+      hideToast();
+      const box = document.createElement("div");
+      box.className = "dsh-lookout-ws-toast";
+      box.setAttribute(WS_TOAST_ATTR, "");
+      box.setAttribute("role", "status");
+      box.setAttribute("aria-live", "polite");
+      const text = document.createElement("span");
+      text.className = "dsh-lookout-ws-toast-text";
+      text.textContent = message;
+      box.appendChild(text);
+      if (dismissable === true) {
+        const dismiss = document.createElement("button");
+        dismiss.type = "button";
+        dismiss.textContent = translate("dismiss");
+        dismiss.addEventListener("click", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          wsRowsWriteFlag(WS_ROWS_DISMISSED_KEY, true);
+          hideToast();
+        });
+        box.appendChild(dismiss);
+      }
+      document.body.appendChild(box);
+      toast = box;
+      paintedAt = Date.now();
+      toastTimer = window.setTimeout(hideToast, WS_TOAST_MS);
+    }
+
+    function hideToast() {
+      if (toastTimer !== 0) { try { window.clearTimeout(toastTimer); } catch { /* gone */ } toastTimer = 0; }
+      if (toast !== null) { try { toast.remove(); } catch { /* gone */ } toast = null; }
+    }
+
+    // ---- lifecycle ------------------------------------------------------
+    function dispose() {
+      if (disposed) return;
+      disposed = true;
+      try { stopWatching(); } catch { /* best effort */ }
+      try { hideToast(); } catch { /* best effort */ }
+      try { removeBadges(); } catch { /* best effort */ }
+      if (saveTimer !== 0) { try { window.clearTimeout(saveTimer); } catch { /* gone */ } saveTimer = 0; }
+      if (pinTimer !== 0) { try { window.clearTimeout(pinTimer); } catch { /* gone */ } pinTimer = 0; }
+      if (pinUnsubscribe !== null) { try { pinUnsubscribe(); } catch { /* gone */ } pinUnsubscribe = null; }
+      pinService = null;
+      try {
+        document.querySelectorAll('style[data-plugin-css="' + WS_STYLE_KEY + '"],style[data-plugin-css="' + WS_HIDE_STYLE_KEY + '"]').forEach((node) => {
+          try { node.remove(); } catch { /* gone */ }
+        });
+      } catch { /* best effort */ }
+      prefListeners.clear();
+    }
+
+    ensureStaticStyle();
+    bindWorkspaceService();
+    startWatching();
+    loadFromHost();
+
+    return {
+      dispose,
+      snapshot,
+      subscribe: subscribePrefs,
+      updateEntry,
+      cleanupMissing,
+      paintNow: paint,
+      pinNow,
+      domWorkspaceIds,
+      setEnabled,
+      isEnabled: () => enabled === true
+    };
+  }
+  //#endregion
+
+  //#region session id in the sidebar hover card
+  /**
+   * The session id, printed inside the sidebar's session hover card.
+   *
+   * Why a slot instead of DOM patching: ui-workspace renders
+   * `renderSlot("sidebar.session.row.hover", { sessionId })` between the card's
+   * time line and its status lines, so this is a documented seat. No host markup
+   * is read or written, and a host upgrade that moves the card carries our line
+   * with it.
+   *
+   * The header badge of the byte-locked dsh-session-info part cannot be edited,
+   * so "move" is delivered as CSS: while this line is ON, that badge is hidden,
+   * which puts the id in exactly one place. Turning the switch OFF restores the
+   * header and drops the card line — i.e. the shipped behaviour, untouched.
+   */
+  const HOVER_SLOT = "sidebar.session.row.hover";
+  /** Own locale namespace: locale.register THROWS on a duplicate namespace. */
+  const HOVER_NS = "dsh-lookout-session-id";
+  /** localStorage switch; absent or unreadable means ON. */
+  const HOVER_ENABLED_KEY = "dsh-lookout:session-id:hover";
+  const HOVER_STYLE_KEY = "lookout-session-id-hover";
+  const HOVER_HIDE_STYLE_KEY = "lookout-session-id-hide";
+  const HOVER_LINE_CLASS = "dsh-lookout-session-id-hover";
+  const HOVER_TOAST_CLASS = "dsh-lookout-session-id-hover-toast";
+  const HOVER_TOAST_ATTR = "data-lookout-session-id-toast";
+  const HOVER_TOAST_MS = 2000;
+  /** The bundled part's own badge class, hidden while the card carries the id. */
+  const HOVER_HEADER_SELECTOR = ".dsh-session-info";
+
+  const HOVER_ZH = {
+    nav: "会话 ID",
+    toggleLabel: "在会话悬停卡片里显示会话 ID（顶部不再重复显示）",
+    toggleHint: "侧栏里鼠标停在某个会话上，弹出的卡片里会多一行等宽字：这个会话的完整 ID（session-…），点一下即可复制。开启时顶部那串会话 ID 会隐藏，避免同一个 ID 显示两处；关掉即恢复原样。",
+    copied: "已复制会话 ID",
+    copyFailed: "复制失败，请手动选择会话 ID 复制",
+    copyHint: "点击复制完整会话 ID",
+    ariaLabel: "复制完整会话 ID"
+  };
+  const HOVER_EN = {
+    nav: "Session ID",
+    toggleLabel: "Show the session ID in the session hover card (hidden in the header)",
+    toggleHint: "Hovering a session in the sidebar opens a card; this adds one monospace line with the session's full ID (session-…), and one click copies it. While this is on, the header stops showing the same id so it appears in exactly one place; turning it off restores the shipped behaviour.",
+    copied: "Session ID copied",
+    copyFailed: "Copy failed — select the session ID and copy it manually",
+    copyHint: "Click to copy the full session ID",
+    ariaLabel: "Copy the full session ID"
+  };
+
+  const HOVER_CSS = [
+    // One quiet line under the card's time, in the same voice as its status rows.
+    "." + HOVER_LINE_CLASS + "{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;line-height:1.5;color:var(--dsw-alias-label-tertiary,#8b8b8b);opacity:.85;word-break:break-all;cursor:copy;user-select:text;}",
+    "." + HOVER_LINE_CLASS + ":hover,." + HOVER_LINE_CLASS + ":focus-visible{opacity:1;text-decoration:underline;outline:none;}",
+    "." + HOVER_TOAST_CLASS + "{position:fixed;left:50%;bottom:24px;z-index:2147482100;max-width:min(92vw,560px);padding:9px 12px;transform:translateX(-50%);border:1px solid var(--dsw-alias-border-l2,#444);border-radius:10px;background:var(--dsw-alias-bg-overlay,#222);color:var(--dsw-alias-label-primary,#fff);font-family:-apple-system,BlinkMacSystemFont,\"Segoe UI\",Roboto,\"Helvetica Neue\",Arial,sans-serif;font-size:12px;line-height:1.5;box-shadow:0 8px 24px var(--dsw-alias-bg-mask-drop,rgba(0,0,0,.25));}",
+    "." + HOVER_TOAST_CLASS + "[data-lookout-session-id-failed]{color:var(--dsw-alias-state-error-primary,#ff6b6b);}"
+  ].join("\n");
+
+  /** Chinese fallback for every translate call, used when locale is unavailable. */
+  function hoverFallbackText(key, params) {
+    const template = typeof HOVER_ZH[key] === "string" ? HOVER_ZH[key] : key;
+    if (params === null || params === undefined || typeof params !== "object") return template;
+    let text = template;
+    for (const name of Object.keys(params)) text = text.split("{" + name + "}").join(String(params[name]));
+    return text;
+  }
+
+  /** Whether the card line is wanted; storage that throws counts as ON. */
+  function hoverReadFlag() {
+    try {
+      const raw = window.localStorage.getItem(HOVER_ENABLED_KEY);
+      if (raw === "1") return true;
+      if (raw === "0") return false;
+      return true;
+    } catch { return true; }
+  }
+
+  /** Persist the switch; a storage failure only costs durability. */
+  function hoverWriteFlag(value) {
+    try { window.localStorage.setItem(HOVER_ENABLED_KEY, value ? "1" : "0"); } catch { /* advisory */ }
+  }
+
+  /** One warning per page at most, and only for a real degradation. */
+  let hoverWarned = false;
+  function hoverWarn(message, error) {
+    if (hoverWarned) return;
+    hoverWarned = true;
+    try { console.warn("dsh-lookout: " + message, error); } catch { /* no console */ }
+  }
+
+  /**
+   * Mount the card line, its settings switch and the header-hiding stylesheet.
+   * Swallows everything: a UI seat may never throw into the host apply().
+   * @param ctx - the merged plugin client context.
+   * @param require - the ModuleLoader require (React lives behind it).
+   * @returns {void}
+   */
+  function sessionIdHoverStart(ctx, require) {
+    try {
+      sessionIdHoverInstall(ctx, require);
+    } catch (error) {
+      hoverWarn("会话 ID 悬停卡片初始化失败,已跳过(不影响宿主):", error);
+    }
+  }
+
+  /**
+   * Install the seat and return its teardown.
+   * @param ctx - the merged plugin client context.
+   * @param require - the ModuleLoader require.
+   * @returns {() => void} disposer.
+   */
+  function sessionIdHoverInstall(ctx, require) {
+    let disposed = false;
+    let enabled = hoverReadFlag();
+    let translate = hoverFallbackText;
+    let toast = null;
+    let toastTimer = 0;
+    const toggleListeners = new Set();
+    const React = require("react");
+
+    /** Every card line and settings switch reads this, so one switch moves both. */
+    function notifyToggle() {
+      for (const listener of Array.from(toggleListeners)) { try { listener(enabled); } catch { /* gone */ } }
+    }
+
+    function subscribeToggle(listener) {
+      if (typeof listener !== "function") return () => {};
+      toggleListeners.add(listener);
+      return () => { toggleListeners.delete(listener); };
+    }
+
+    // ---- locale ---------------------------------------------------------
+    try {
+      const locale = ctx !== null && ctx !== undefined ? ctx.locale : null;
+      if (locale !== null && locale !== undefined && typeof locale.register === "function") {
+        const register = () => locale.register(HOVER_NS, { zh: HOVER_ZH, en: HOVER_EN });
+        if (typeof ctx.effect === "function") ctx.effect(register, "dsh-lookout: session id dictionaries");
+        else register();
+      }
+      if (locale !== null && locale !== undefined && typeof locale.bind === "function") {
+        const bound = locale.bind(HOVER_NS);
+        translate = (key, params) => {
+          let text = key;
+          try { text = bound(key, params); } catch { text = key; }
+          return typeof text === "string" && text !== key ? text : hoverFallbackText(key, params);
+        };
+      }
+    } catch (error) { /* the Chinese fallback is already in translate */ }
+
+    // ---- styles ---------------------------------------------------------
+    function ensureStyleTag(key, css) {
+      try {
+        const existing = document.querySelector('style[data-plugin-css="' + key + '"]');
+        if (existing !== null && existing !== undefined) {
+          if (typeof css === "string" && existing.textContent !== css) { try { existing.textContent = css; } catch { /* gone */ } }
+          return existing;
+        }
+        const tag = document.createElement("style");
+        tag.setAttribute("data-plugin", "dsh-lookout");
+        tag.setAttribute("data-plugin-css", key);
+        tag.textContent = typeof css === "string" ? css : "";
+        const head = document.head !== null && document.head !== undefined ? document.head : document.body;
+        if (head !== null && head !== undefined) head.appendChild(tag);
+        return tag;
+      } catch { return null; }
+    }
+
+    /**
+     * Hide the shipped header badge while the card carries the id.
+     *
+     * The badge lives in a byte-locked part, so it cannot be removed from the
+     * bundle; hiding it with one scoped rule is the reversible half of "move".
+     */
+    function syncHeaderBadge() {
+      if (disposed) return;
+      if (enabled) { ensureStyleTag(HOVER_HIDE_STYLE_KEY, HOVER_HEADER_SELECTOR + "{display:none !important;}"); return; }
+      try {
+        document.querySelectorAll('style[data-plugin-css="' + HOVER_HIDE_STYLE_KEY + '"]').forEach((node) => {
+          try { node.remove(); } catch { /* gone */ }
+        });
+      } catch { /* best effort */ }
+    }
+
+    // ---- toast + clipboard ----------------------------------------------
+    function hideToast() {
+      if (toastTimer !== 0) { try { window.clearTimeout(toastTimer); } catch { /* gone */ } toastTimer = 0; }
+      if (toast !== null) { try { toast.remove(); } catch { /* gone */ } toast = null; }
+    }
+
+    function showToast(message, ok) {
+      if (disposed) return;
+      if (document.body === null || document.body === undefined) return;
+      hideToast();
+      const box = document.createElement("div");
+      box.className = HOVER_TOAST_CLASS;
+      box.setAttribute(HOVER_TOAST_ATTR, "");
+      if (ok !== true) box.setAttribute("data-lookout-session-id-failed", "");
+      box.setAttribute("role", "status");
+      box.setAttribute("aria-live", "polite");
+      box.textContent = message;
+      document.body.appendChild(box);
+      toast = box;
+      toastTimer = window.setTimeout(hideToast, HOVER_TOAST_MS);
+    }
+
+    async function writeClipboard(text) {
+      try {
+        const primitives = require("@deepseek-ai/dsh-client-ui-primitives");
+        if (primitives !== null && primitives !== undefined && typeof primitives.writeClipboard === "function") {
+          const result = await primitives.writeClipboard(text);
+          if (result !== false) return true;
+        }
+      } catch { /* fall through to the browser API */ }
+      try {
+        if (typeof navigator !== "undefined" && navigator.clipboard !== null && navigator.clipboard !== undefined && typeof navigator.clipboard.writeText === "function") {
+          await navigator.clipboard.writeText(text);
+          return true;
+        }
+      } catch { /* fall through to the textarea */ }
+      try {
+        const area = document.createElement("textarea");
+        area.value = text;
+        area.setAttribute("readonly", "");
+        area.style.position = "fixed";
+        area.style.top = "0";
+        area.style.left = "-9999px";
+        area.style.opacity = "0";
+        document.body.appendChild(area);
+        try { area.focus(); area.select(); } catch { /* focus is advisory */ }
+        const copied = typeof document.execCommand === "function" && document.execCommand("copy") === true;
+        try { area.remove(); } catch { /* gone */ }
+        return copied;
+      } catch { return false; }
+    }
+
+    async function copyId(id) {
+      let copied = false;
+      try { copied = await writeClipboard(id); } catch { copied = false; }
+      if (disposed) return;
+      showToast(copied ? translate("copied") : translate("copyFailed"), copied === true);
+      return copied;
+    }
+
+    // ---- the card line ---------------------------------------------------
+    /**
+     * One card line: the full session id, click or Enter/Space to copy it.
+     *
+     * A `div[role=button]` rather than a `button`: the card is a passive panel
+     * and the row it describes owns the click that opens the session, so this
+     * line must stay a leaf that steals only its own events.
+     */
+    function SessionIdHoverLine(props) {
+      const [on, setOn] = React.useState(() => enabled);
+      React.useEffect(() => subscribeToggle(setOn), []);
+      const id = props !== null && props !== undefined && typeof props.sessionId === "string" ? props.sessionId : "";
+      if (on !== true || id === "") return null;
+      const label = props !== null && props !== undefined && typeof props.t === "function" ? props.t : translate;
+      const activate = (event) => {
+        if (event !== null && event !== undefined) {
+          if (typeof event.preventDefault === "function") event.preventDefault();
+          if (typeof event.stopPropagation === "function") event.stopPropagation();
+        }
+        void copyId(id);
+      };
+      const onKeyDown = (event) => {
+        if (event === null || event === undefined) return;
+        if (event.key !== "Enter" && event.key !== " " && event.key !== "Spacebar") return;
+        activate(event);
+      };
+      return React.createElement("div", {
+        className: HOVER_LINE_CLASS,
+        role: "button",
+        tabIndex: 0,
+        title: label("copyHint"),
+        "aria-label": label("ariaLabel"),
+        "data-lookout-session-id": id,
+        onClick: activate,
+        onKeyDown
+      }, id);
+    }
+
+    // ---- settings --------------------------------------------------------
+    function SessionIdHoverSection(props) {
+      const label = props !== null && props !== undefined && typeof props.t === "function" ? props.t : translate;
+      const [checked, setChecked] = React.useState(() => hoverReadFlag());
+      React.useEffect(() => subscribeToggle(setChecked), []);
+      const onChange = (event) => {
+        const next = event.target.checked === true;
+        setChecked(next);
+        setEnabled(next);
+      };
+      return React.createElement("div", { "data-lookout-settings": "session-id" },
+        React.createElement("div", { style: { fontSize: 13, fontWeight: 600, color: "var(--dsw-alias-label-primary)", marginBottom: 8 } }, label("nav")),
+        React.createElement("label", { style: { display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--dsw-alias-label-primary)", cursor: "pointer" } },
+          React.createElement("input", { type: "checkbox", checked, onChange }),
+          React.createElement("span", null, label("toggleLabel"))
+        ),
+        React.createElement("div", { style: { marginTop: 6, fontSize: 12, lineHeight: 1.6, color: "var(--dsw-alias-label-tertiary)" } }, label("toggleHint"))
+      );
+    }
+
+    /** Flip the line and the header rule together, then persist. */
+    function setEnabled(next) {
+      enabled = next === true;
+      hoverWriteFlag(enabled);
+      syncHeaderBadge();
+      if (!enabled) hideToast();
+      notifyToggle();
+    }
+
+    // ---- wiring ----------------------------------------------------------
+    ensureStyleTag(HOVER_STYLE_KEY, HOVER_CSS);
+    syncHeaderBadge();
+
+    try {
+      const slots = ctx !== null && ctx !== undefined ? ctx.slots : null;
+      if (slots !== null && slots !== undefined && typeof slots.inject === "function" && typeof slots.register === "function") {
+        // Order 1: above the scheduled-task section (order 10) and the status
+        // lines, directly under the card's time — the id reads as part of the
+        // card's own header, not as one more status.
+        slots.inject(HOVER_SLOT, () => slots.register({
+          name: HOVER_SLOT,
+          id: "lookout-session-id",
+          order: 1,
+          locale: HOVER_NS,
+          inject: () => ({ t: translate })
+        }, SessionIdHoverLine));
+        slots.inject("settings.section", () => slots.register({
+          name: "settings.section",
+          id: "lookout-session-id",
+          order: 57,
+          label: () => translate("nav"),
+          locale: HOVER_NS,
+          inject: () => ({ t: translate })
+        }, SessionIdHoverSection));
+      }
+    } catch (error) {
+      hoverWarn("会话 ID 插槽注册失败,已跳过(不影响宿主):", error);
+    }
+
+    function dispose() {
+      if (disposed) return;
+      disposed = true;
+      hideToast();
+      toggleListeners.clear();
+      try {
+        document.querySelectorAll('style[data-plugin-css="' + HOVER_STYLE_KEY + '"],style[data-plugin-css="' + HOVER_HIDE_STYLE_KEY + '"]').forEach((node) => { try { node.remove(); } catch { /* gone */ } });
+      } catch { /* best effort */ }
+    }
+
+    if (ctx !== null && ctx !== undefined && typeof ctx.effect === "function") {
+      try { ctx.effect(() => dispose, "dsh-lookout: session id in hover card"); } catch { /* best effort */ }
+    }
+    return dispose;
+  }
+  //#endregion
+
+
   window.__ModuleLoader__.load({
     id: "dsh-lookout",
     factory: (require) => {
@@ -8184,6 +10077,12 @@ window.__ModuleLoader__.load({
           // starts first and owns its own try/catch: a fault in any part (or a
           // missing files panel) only costs this feature, never the host.
           rowMenuStart(ctx, require);
+          // Workspace tags + hiding are independent of the three bundled parts for
+          // the same reason, and own their own try/catch inside wsRowsStart.
+          wsRowsStart(ctx, require);
+          // The session id in the sidebar's hover card rides an official slot
+          // (sidebar.session.row.hover), so it owns its own try/catch too.
+          sessionIdHoverStart(ctx, require);
           for (const m of __mods) { if (m && typeof m.apply === "function") m.apply(ctx); }
         },
       };
