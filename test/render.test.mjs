@@ -2,7 +2,6 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { renderMail, formatDuration, workspaceName, displayTitle, formatTime } from '../lib/notify/render.js';
-import { defaultConfig } from '../lib/notify/config.js';
 
 const base = {
   outcome: 'completed',
@@ -12,8 +11,6 @@ const base = {
   turn: 3,
   endedAt: 1776000000000,
   durationMs: 252000,
-  config: defaultConfig(),
-  baseUrl: 'http://127.0.0.1:3081',
 };
 
 test('renderMail：主题中英并列 + 标题', () => {
@@ -21,21 +18,17 @@ test('renderMail：主题中英并列 + 标题', () => {
   assert.match(mail.subject, /^\[DSH\] 任务完成 \/ completed · 修复登录页样式$/);
 });
 
-test('renderMail：正文写清"是哪个会话"，并附可点击直达链接', () => {
+test('renderMail：正文写清"是哪个会话"，且不含任何链接', () => {
   const mail = renderMail(base);
   assert.match(mail.text, /会话标题 \/ Session：修复登录页样式/);
   assert.match(mail.text, /工作区　 \/ Workspace：12000011_响应式网页适配/);
   assert.match(mail.text, /会话 ID　\/ Session ID：session-a25bd099/);
-  assert.match(mail.text, /直达会话 \/ Open session：http:\/\/127\.0\.0\.1:3081\/\?session=session-a25bd099/);
-  assert.match(mail.html, /href="http:\/\/127\.0\.0\.1:3081\/\?session=session-a25bd099-cae9-4732-8179-f8eabd33541b"/);
-  assert.equal(mail.link, 'http://127.0.0.1:3081/?session=session-a25bd099-cae9-4732-8179-f8eabd33541b');
-});
-
-test('renderMail：关掉链接开关就不出现链接（也不出现按钮）', () => {
-  const mail = renderMail({ ...base, config: { ...defaultConfig(), linkEnabled: false } });
-  assert.equal(mail.link, '');
+  // 「邮件直达会话」能力已整块删除：没有"直达会话"行、没有 URL 原文、没有 CTA 按钮
   assert.doesNotMatch(mail.text, /直达会话/);
+  assert.doesNotMatch(mail.text, /https?:\/\//);
   assert.doesNotMatch(mail.html, /打开该会话/);
+  assert.doesNotMatch(mail.html, /href=/);
+  assert.equal('link' in mail, false, 'renderMail 不该再有 link 字段（不留恒为空的死字段）');
 });
 
 test('renderMail：拿不到标题时降级成会话 ID 前 8 位（要剥掉 session- 前缀）', () => {

@@ -15,10 +15,13 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { runPart } from './merged-client-parts.mjs';
+import { partSource, runPart } from './merged-client-parts.mjs';
 
 const SOURCE_PATH = fileURLToPath(new URL('../client/client.js', import.meta.url));
 const SOURCE = readFileSync(SOURCE_PATH, 'utf8');
+
+/** 合并文件里 B 段（原 dsh-notify-p）的正文：命名空间这类断言只该看这一段。 */
+const PART_B = partSource('b');
 
 /** 宿主主题里真实存在的 alias token（取自 dsh-client-ui-theme 的 token 表）。 */
 const THEME_TOKENS = new Set([
@@ -251,7 +254,9 @@ test('源码护栏：客户端半边不再有 log / resend 通道的痕迹', () 
 
 test('源码护栏：每个开关的可访问名都来自文案，而不是字段 key', () => {
   assert.equal(/\blabel:\s*key\b/.test(SOURCE), false, 'aria-label 不能直接用字段 key');
-  assert.equal(SOURCE.includes("label: t('"), true, '开关的可访问名必须走文案');
+  // 开关行改由页内 outcomeRow 拼（说明收进问号），可访问名从"标题文案键"来——
+  // 仍然是文案、不是字段名，这一条盯的就是这个区别。
+  assert.equal(/label:\s*t\(/.test(SOURCE), true, '开关的可访问名必须走文案');
 });
 
 test('纯函数：parseRecipients 与 Host 侧规则一致（去空、去重、分拣非法项）', async () => {
@@ -269,69 +274,10 @@ test('纯函数：parseRecipients 与 Host 侧规则一致（去空、去重、�
   assert.deepEqual(parseRecipients('   \n , ; '), { valid: [], invalid: [] });
 });
 
-test('纯函数：migrateSenders 与 Host 侧 senderList 同规则（迁移、去空、去重）', async () => {
-  const { migrateSenders } = (await loadBundle()).mod.__internals;
-  // 老配置迁移：fromAddress 有值 → 合成唯一一条
-  assert.deepEqual(migrateSenders({ senderName: '旧名', fromAddress: 'a@x.com' }), [{ name: '旧名', address: 'a@x.com' }]);
-  // 旧地址为空 → 不迁移（等价于"清单为空 = 回退默认"）
-  assert.deepEqual(migrateSenders({ senderName: '旧名', fromAddress: '' }), []);
-  assert.deepEqual(migrateSenders({}), []);
-  // 新清单非空就作数，旧字段不再参与
-  assert.deepEqual(
-    migrateSenders({ senders: [{ name: '新', address: 'b@y.com' }], fromAddress: 'a@x.com' }),
-    [{ name: '新', address: 'b@y.com' }],
-  );
-  // 去空、按地址去重（不分大小写）、trim
-  assert.deepEqual(
-    migrateSenders({ senders: [{ address: '  ' }, { name: ' A ', address: ' a@x.com ' }, { address: 'A@X.com' }] }),
-    [{ name: 'A', address: 'a@x.com' }],
-  );
-});
-
-test('纯函数：发件人的选中 / 校验 / 增改 / 删除四条规则', async () => {
-  const { activeSenderAddress, senderIssue, senderCommit, senderRemove } = (await loadBundle()).mod.__internals;
-  const list = [{ name: 'A', address: 'a@x.com' }, { name: 'B', address: 'b@y.com' }];
-
-  // 选中：按地址匹配，找不到退回第一条，空清单给空串
-  assert.equal(activeSenderAddress({ activeSender: 'b@y.com' }, list), 'b@y.com');
-  assert.equal(activeSenderAddress({ activeSender: 'B@Y.COM' }, list), 'b@y.com', '大小写不敏感');
-  assert.equal(activeSenderAddress({ activeSender: 'gone@z.com' }, list), 'a@x.com', '选中的没了就退回第一条');
-  assert.equal(activeSenderAddress({}, list), 'a@x.com');
-  assert.equal(activeSenderAddress({}, []), '');
-
-  // 校验：空 / 格式 / 重复；改自己那条不算重复
-  assert.equal(senderIssue(list, 2, { address: '' }), 'needAddress');
-  assert.equal(senderIssue(list, 2, { address: 'nope' }), 'badAddress');
-  assert.equal(senderIssue(list, 2, { address: 'B@Y.com' }), 'duplicate');
-  assert.equal(senderIssue(list, 1, { address: 'b@y.com' }), '', '改自己那条不算重复');
-  assert.equal(senderIssue(list, 2, { address: ' c@z.com ' }), '', '两头空白要能过');
-
-  // 新增：追加到末尾，并自动成为生效项
-  assert.deepEqual(
-    senderCommit({ list, active: 'a@x.com', editing: 2 }, { name: 'C', address: 'c@z.com' }),
-    { list: [...list, { name: 'C', address: 'c@z.com' }], active: 'c@z.com' },
-  );
-  // 改地址：改的正是生效项 → 生效项跟着新地址走
-  assert.deepEqual(
-    senderCommit({ list, active: 'a@x.com', editing: 0 }, { name: 'A2', address: 'a2@x.com' }),
-    { list: [{ name: 'A2', address: 'a2@x.com' }, list[1]], active: 'a2@x.com' },
-  );
-  // 改的不是生效项 → 生效项不动（否则"在别处改个字，发信人就被换掉了"）
-  assert.deepEqual(
-    senderCommit({ list, active: 'a@x.com', editing: 1 }, { name: 'B2', address: 'b2@y.com' }),
-    { list: [list[0], { name: 'B2', address: 'b2@y.com' }], active: 'a@x.com' },
-  );
-
-  // 删除：删生效项 → 选它下面那条；没有下面 → 选最后一条；删完 → 清空生效位
-  assert.deepEqual(senderRemove({ list, active: 'a@x.com' }, 0), { list: [list[1]], active: 'b@y.com' });
-  assert.deepEqual(senderRemove({ list, active: 'b@y.com' }, 1), { list: [list[0]], active: 'a@x.com' });
-  assert.deepEqual(senderRemove({ list, active: 'b@y.com' }, 0), { list: [list[1]], active: 'b@y.com' }, '删的不是生效项就不动选中');
-  assert.deepEqual(senderRemove({ list: [list[0]], active: 'a@x.com' }, 0), { list: [], active: '' });
-});
-
 test('纯函数：deriveStatus 真值表覆盖每个状态分支', async () => {
   const { deriveStatus } = (await loadBundle()).mod.__internals;
-  // 发送方式只有 SMTP，所以入参里也没有 transport——状态集合就是下面这七个。
+  // 发送方式只有 SMTP，所以入参里也没有 transport；账本删掉之后也没有"上次失败"——
+  // 状态集合就是下面这六个，判决只回答"配置齐不齐"。
   const base = { enabled: true, recipientCount: 1, host: 'smtp.qq.com', user: 'me@qq.com', credentialConfigured: true };
   assert.equal(deriveStatus({ ...base, enabled: false }), 'disabled');
   assert.equal(deriveStatus({ ...base, recipientCount: 0 }), 'needRecipients');
@@ -341,8 +287,8 @@ test('纯函数：deriveStatus 真值表覆盖每个状态分支', async () => {
   assert.equal(deriveStatus({ ...base, user: '  ' }), 'needUser');
   assert.equal(deriveStatus({ ...base, credentialConfigured: false }), 'needCredential');
   assert.equal(deriveStatus({ ...base, host: '', credentialConfigured: false }), 'needHost', '先报主机，不越级报凭据');
-  assert.equal(deriveStatus({ ...base, lastDelivery: { ok: false, error: '535' } }), 'lastFailed');
-  assert.equal(deriveStatus({ ...base, lastDelivery: { ok: true } }), 'ready');
+  assert.equal(deriveStatus({ ...base, lastDelivery: { ok: false, error: '535' } }), 'ready',
+    '投递历史已随账本删除：传进来也不再影响判决');
   assert.equal(deriveStatus(base), 'ready');
   assert.equal(deriveStatus(undefined), 'disabled');
   // 判定顺序：先关、再收件人、再 SMTP 的必填项
@@ -378,27 +324,66 @@ test('纯函数：dotState 对不适用给 idle，而不是假警报', async () 
   assert.equal(dotState(true, true), 'idle');
 });
 
-test('纯函数：relativeTime 给投递结果一句人话', async () => {
-  const { relativeTime } = (await loadBundle()).mod.__internals;
-  const now = 1_776_000_000_000;
-  assert.equal(relativeTime(now - 3_000, now), '刚刚');
-  assert.equal(relativeTime(now - 30_000, now), '30 秒前');
-  assert.equal(relativeTime(now - 5 * 60_000, now), '5 分钟前');
-  assert.equal(relativeTime(now - 3 * 3_600_000, now), '3 小时前');
-  assert.equal(relativeTime(now - 2 * 86_400_000, now), '2 天前');
-  assert.equal(relativeTime(undefined, now), '', '拿不到时间戳就不编');
-  assert.equal(relativeTime(Number.NaN, now), '');
-});
-
-test('源码护栏：发送测试邮件必须常驻，不能只在"已就绪"时才给按钮', () => {
+test('源码护栏：发送测试邮件常驻，判决条主入口 + 凭据行弱入口两处并存', () => {
   // 曾经的形态：只有 statusKey 是 ready / lastFailed 时才渲染测试按钮，
   // 于是填了一半的人在页面上根本找不到"怎么验证"——而这恰恰是测试按钮最该出现的时候。
   assert.match(SOURCE, /const testButton = \(\s*[A-Za-z_$][A-Za-z0-9_$]*\s*\) => \{/, '必须有一个不挑状态的测试按钮构造函数');
   assert.equal(/statusKey === 'ready'[\s\S]{0,200}?act\.test/.test(SOURCE), false,
     '测试按钮不允许被 statusKey 门控');
-  assert.equal((SOURCE.match(/testButton\(/g) ?? []).length >= 2, true,
-    '状态条之外还要有一个常驻入口（凭据行 / 最近一次投递）');
+  // 两处入口是刻意的，不是重复：判决条一处（主按钮，就绪/未就绪互斥）+ 凭据行一处
+  // （文字链接，手刚离开授权码输入框就在原地验证，不必滚回页首）。删掉后者省不了高度，
+  // 只会让人多滚一次——所以这里钉死"它必须还在"，防止后续"简化"又把它删掉。
+  // 视觉骨架这一轮把判决条收成一个**主行动**（实心主按钮），所以源码里是两处调用点：
+  // 判决条 + 凭据行。渲染出来「仍然只有两处」由 page-render.test.mjs 逐状态钉死
+  // （就绪与未就绪各断言 === 2），这一条只保证源码里没有把任何一处丢掉。
+  assert.equal((PART_B.match(/testButton\(/g) ?? []).length >= 2, true, '调用点至少两处（判决条一处 + 凭据行一处）');
+  assert.equal(PART_B.includes("testButton({ variant: 'primary' })"), true, '判决条那一处必须是实心主按钮');
+  assert.equal(PART_B.includes("testButton({ variant: 'link' })"), true, '凭据行的文字链接入口必须保留');
   assert.equal(SOURCE.includes("t('act.testHint')"), true, '常驻按钮要说清点了会发生什么');
+});
+
+// 本轮两处删除必须"删干净"：留着半截的 RPC 或半截的文案键，测试可能是绿的，
+// 但页面还在向一个已经不存在的端点要账本。这里按字节把残留钉死。
+test('源码护栏：投递账本与「高级」折叠区已整块删除', () => {
+  // 账本：不再有 state 这条 RPC、不再有端点探活的告警、不再有「上次失败」这一档。
+  assert.equal(/callRemote\('state'\)/.test(SOURCE), false, 'mailNotify/state 已随账本删除，客户端不能再调');
+  assert.equal(SOURCE.includes('mailNotify 端点'), false, '端点探活的告警文案必须一起删');
+  assert.equal(/lastFailed/.test(SOURCE), false, '「上次失败」这一档依赖账本，必须删掉');
+  assert.equal(/evidence\.|最近一次发送|还没有试过/.test(SOURCE), false, '账本面板的读数键与标签必须删掉');
+  assert.equal(SOURCE.includes("Host 未提供 mailNotify 能力"), true, '只有 test 一条 RPC 时，能力缺失仍要能报错');
+  // 「高级」折叠区：四个旋钮（含时长下限）的字段名与折叠状态都不该再出现。
+  for (const field of ['settleMs', 'minDurationMs', 'ratePerMinute', 'statePath', 'showAdvanced', 'customHost']) {
+    assert.equal(SOURCE.includes(field), false, field + ' 属于已删除的「高级」/时长下限控件');
+  }
+  assert.equal(/group\.advanced|adv\./.test(SOURCE), false, '「高级」折叠区的文案键必须删掉');
+  // 测试邮件的结果仍必须来自当场 RPC 返回，而不是账本快照。
+  assert.equal(SOURCE.includes("callRemote('test')"), true, '发送测试邮件必须调 mailNotify/test');
+  assert.equal(SOURCE.includes("t('test.sent')"), true, '成功结果要有自己的文案');
+  assert.equal(SOURCE.includes("t('test.failed')"), true, '失败结果要有自己的文案');
+});
+
+// 本轮把「可选设置 → 发件人与链接」整块删了，顺手清了两处死代码（Sub 组件、test.transport）。
+// 与账本那一轮同样的道理：留着半截的迁移函数或半个文案键，测试可能是绿的，
+// 但页面上还挂着一块没有字段可绑的设置。这里按字节把残留钉死。
+test('源码护栏：可选设置（发件人与链接）整块删除，Sub 与 test.transport 死代码一并清掉', () => {
+  // 文案键：标题、清单、弹层、链接开关与地址提示，一套都不该留。
+  for (const key of ['group.optional', 'group.sender', 'sender.name', 'sender.nameHint', 'sender.address',
+    'sender.addressHint', 'sender.listLabel', 'sender.listHint', 'sender.empty', 'sender.add', 'sender.addTitle',
+    'sender.editTitle', 'sender.save', 'sender.cancel', 'sender.inUse', 'sender.edit', 'sender.remove',
+    'sender.nameUnset', 'sender.useThis', 'sender.issue.', 'link.enabled', 'link.base']) {
+    assert.equal(SOURCE.includes(key), false, key + ' 属于已删除的「可选设置」');
+  }
+  // 实现：六个配置字段（Host 侧已删）、五个纯函数、五个页面回调和清单样式，一并清掉。
+  for (const token of ['senders', 'activeSender', 'senderName', 'fromAddress', 'linkEnabled', 'publicBaseUrl',
+    'migrateSenders', 'activeSenderAddress', 'senderIssue', 'senderCommit', 'senderRemove',
+    'showSender', 'senderEdit', 'openSenderDialog', 'saveSenderDialog', 'pickSender', 'removeSender',
+    'dshmn-sender']) {
+    assert.equal(SOURCE.includes(token), false, token + ' 是已删除的发件人 / 链接实现');
+  }
+  // 死代码：Sub 组件定义后无人调用；test.transport 只有写入、全文件没有读取点。
+  assert.equal(/function Sub\s*\(/.test(SOURCE), false, 'Sub 组件定义后无调用，属于死代码');
+  assert.equal(/test\.transport/.test(SOURCE), false, 'test.transport 只写不读，属于死代码');
+  assert.equal(/\btransport\s*:\s*''/.test(SOURCE), false, '测试态里不该再有 transport 字段');
 });
 
 test('源码护栏：凭据读失败要显形，不能静默停在「未配置」', () => {
@@ -470,4 +455,203 @@ test('纯函数：预设推断用户名只在域名匹配时给值', async () =>
   assert.equal(userForPreset(qq, ['cowwo@outlook.com']), '', '收件人不是 QQ 邮箱就不能拿它当发件账号');
   assert.equal(userForPreset(qq, []), '');
   assert.equal(userForPreset(null, ['me@qq.com']), '');
+});
+
+// ── 本轮：DSH 0.2.1-rc.2 的设置模型 ─────────────────────────────────────────
+// describe() 每一项的 ns 是 profile 入口 id（本插件是 lookout，不是老常量 dsh-notify-p），
+// 所以客户端不能写死命名空间——只能按配置指纹认领自己的那一项。
+// 注意：describe() 里的 schema 是 schema.toJSON() 快照（只有 uid/refs，没有 dict），
+// 拿它当指纹永远认领不到——必须看 value 里的字段。
+test('源码护栏：配置命名空间按 value 指纹认领，常量 NS 必须整块消失', () => {
+  assert.equal(
+    PART_B.includes("Object.hasOwn(d.value, 'smtpHost') && Object.hasOwn(d.value, 'smtpPasswordRef')"),
+    true,
+    '认领必须靠 value 指纹（smtpHost + smtpPasswordRef 是这一页独有的组合）',
+  );
+  assert.equal(
+    PART_B.includes('d.schema.dict'),
+    false,
+    '不许拿 describe() 的 schema.dict 当指纹（toJSON 里没有 dict）',
+  );
+  assert.equal(PART_B.includes('item.ns === NS'), false, '不能再按写死的 ns 查找');
+  assert.equal(PART_B.includes('const NS = '), false, '常量 NS 必须整块换掉');
+  assert.equal(PART_B.includes('settings.mutate(NS'), false, '读写一律用认领到的 ns');
+  assert.equal(PART_B.includes('settings.replace(NS'), false, '读写一律用认领到的 ns');
+  assert.equal(PART_B.includes('bridge.settings.mutate(view.ns, ops, view.revision)'), true,
+    'mutate 必须带发现到的 ns 与 revision');
+  assert.equal(PART_B.includes('bridge.settings.replace(view.ns, {}, view.revision)'), true,
+    '恢复默认同样用发现到的 ns');
+});
+
+// 编辑模型从「改一下立刻写」换成「显式保存」：控件只动草稿，写回只有 saveAll 一条路径。
+test('源码护栏：显式保存——控件不再自动写回，写入口只有 saveAll 一条', () => {
+  assert.equal(SOURCE.includes('commit([key])'), false, '按字段即时提交的 commit 必须删掉');
+  assert.equal(SOURCE.includes("flush('"), false, '失焦兜底提交必须删掉');
+  assert.equal(SOURCE.includes('TEXT_DEBOUNCE_MS'), false, '防抖写回已不存在，常量不许留');
+  assert.equal(SOURCE.includes("'save.auto'"), false, '「改动即时生效」那套读数必须删掉');
+  for (const key of ['act.save', 'act.discard', 'save.clean', 'save.saving', 'save.savedJust', 'save.retry']) {
+    assert.equal(SOURCE.includes("t('" + key + "'"), true, key + ' 必须有对应的界面文案');
+  }
+  assert.equal(SOURCE.includes("t('save.dirty'"), true, '脏读数要报「有 N 项改动未保存」');
+  // 一次保存只发一条 mutate；凭据的写入目标仍然由调用方给定。
+  assert.equal(SOURCE.includes('const ops = diffOps(draftRef.current, baselineRef.current)'), true,
+    '保存时取一次全量差异');
+  assert.equal(SOURCE.includes('await commitCredential(ref)'), true, '凭据只在保存时按行写入');
+  assert.equal(SOURCE.includes('draftRef.current.smtpPasswordRef ??'), false,
+    '不许从草稿里 fallback 出 smtpPasswordRef 当作写入目标');
+});
+
+test('纯函数：diffOps 只吐与基线不同的字段，空值走 unset', async () => {
+  const { diffOps } = (await loadBundle()).mod.__internals;
+  assert.deepEqual(diffOps({ a: 1, b: 'x' }, { a: 1, b: 'x' }), [], '与基线一样就没有 ops');
+  assert.deepEqual(diffOps({ a: 2 }, { a: 1 }), [{ op: 'set', path: ['a'], value: 2 }]);
+  assert.deepEqual(diffOps({ a: 'x' }, {}), [{ op: 'set', path: ['a'], value: 'x' }]);
+  assert.deepEqual(diffOps({ a: '' }, { a: 'x' }), [{ op: 'unset', path: ['a'] }]);
+  assert.deepEqual(diffOps({}, { a: 'x' }), [{ op: 'unset', path: ['a'] }], '基线有、草稿没有 = 清掉覆盖');
+  assert.deepEqual(diffOps({ a: null }, { a: 'x' }), [{ op: 'unset', path: ['a'] }]);
+  assert.deepEqual(diffOps(undefined, undefined), []);
+});
+
+// ── 本轮：冲突恢复 / 读失败 / 半成功 / 判决条口径（源码级护栏） ────────────────
+// 这四处各有一条"看起来做了、其实没做"的实现最容易混过去：
+//   1. unwrap 把 RemoteError 的 code 丢掉 → 冲突无从判别，重试必然拿着旧 revision 再撞一次；
+//   2. 读失败塞进 phase='error' → 读数冒充"保存失败"，而「重试」调 saveAll() 在 view===null 时直接 return；
+//   3. 配置成功、凭据失败只报一句"保存失败" → 用户不知道哪一半已经落盘；
+//   4. 判决条按草稿算 → 草稿填齐就说可以发信，测试邮件却用已保存配置，一点就失败。
+test('源码护栏：冲突判别靠 RemoteError 的 code，读失败自成一档', () => {
+  assert.equal(PART_B.includes("if (typeof error.code === 'string') failure.code = error.code;"), true,
+    'unwrap 必须把 RemoteError 的 code 带出来（丢了就无从判别冲突）');
+  assert.equal(PART_B.includes("code === 'settings/conflict'"), true,
+    '冲突的判别码是 settings/conflict（settings 控制器的真实错误码）');
+  assert.equal(PART_B.includes('await load({ preserveDraft: true })'), true,
+    '冲突时复用 load 的认领逻辑自动重读：草稿不动、基线对齐、revision 换新');
+  assert.equal(PART_B.includes("phase: 'loadFailed'"), true, '读配置失败必须是独立的一档');
+  assert.equal(/phase === 'loadFailed'[\s\S]{0,400}?void load\(\)/.test(PART_B), true,
+    '「重新读取」必须调 load()，不能调 saveAll()');
+});
+
+test('源码护栏：判决条按已保存配置（baseline）判定，并说明草稿不参与', () => {
+  assert.equal(PART_B.includes('const savedRecipients = parseRecipients(baseline.recipients);'), true,
+    '判决条的收件人数必须取 baseline');
+  assert.equal(/const statusKey = deriveStatus\(\{\s*enabled: baseline\.enabled === true,/.test(PART_B), true,
+    '判决条只认已保存的开关');
+  assert.equal(PART_B.includes("t('status.unsavedDraft')"), true,
+    '有未保存改动时要说明「未保存的改动不参与判定」');
+  assert.equal(PART_B.includes("'act.testHint': '用已保存的配置真发一封"), true,
+    '「发送测试邮件」的说明必须点明用的是已保存配置');
+});
+
+test('源码护栏：半成功分开报，两个方向各给各的重试', () => {
+  for (const key of ['save.credFailed', 'save.configFailed', 'save.retryCred', 'save.retryConfig']) {
+    assert.equal(PART_B.includes("t('" + key + "'"), true, key + ' 必须有对应文案');
+  }
+  assert.equal(PART_B.includes("phase: 'partialCred'"), true, '配置成了、凭据没成要自成一档');
+  assert.equal(PART_B.includes("phase: 'partialConfig'"), true, '凭据成了、配置没成要自成一档');
+});
+
+test('源码护栏：恢复全部默认要清掉授权码草稿（否则立刻显示「有 1 项改动未保存」）', () => {
+  const body = PART_B.slice(PART_B.indexOf('const resetAll'), PART_B.indexOf('const sendTest'));
+  for (const call of ['setPwDraft({})', 'setPwClear({})', 'setPwEdit({})']) {
+    assert.equal(body.includes(call), true, 'resetAll 必须清掉 ' + call);
+  }
+});
+
+test('源码护栏：端口输入不接受非法字符（Number("46a") 是 NaN）', () => {
+  assert.equal(PART_B.includes("!/^\\d+$/.test(raw)"), true, '端口只收数字，非法字符不进草稿');
+  assert.equal(PART_B.includes("Number(event.target.value)"), false, '不再把原始输入直接 Number() 掉');
+});
+
+
+// ── 本轮：视觉与信息架构简化（中等档）────────────────────────────────────────
+// 结构改动要留下痕迹，否则下一轮很容易"又长回去"。
+test('源码护栏：BUILD 升到 ui17，判决条的保存组与旧折叠包装已删干净', () => {
+  assert.equal(PART_B.includes("const BUILD = 'ui17';"), true, 'BUILD 必须升到 ui17（DOM 上的 data-build 是唯一能看出加载了哪一版的地方）');
+  assert.equal(PART_B.includes('dshmn-verdictActions'), false, '判决条里的保存组（DOM + 样式）必须整块删掉');
+  assert.equal(PART_B.includes('dshmn-disclose'), false, '旧折叠包装的样式与结构都不该留');
+  assert.equal(PART_B.includes('function Disclosure('), false, '旧折叠组件已删（两处折叠都走页内 foldHead）');
+  assert.equal(PART_B.includes('function Row('), false, '旧 Row 组件已删（开关行改成页内 outcomeRow）');
+  assert.equal(PART_B.includes("h('header', { className: 'dshmn-head' }"), true, '页头是一个 header 容器（左标题右保存组）');
+  assert.equal(/\.dshmn-chips\{[^}]*overflow-x:auto/.test(PART_B), true, '7 个预设必须排成一行横向滚动');
+  assert.equal(/\.dshmn-two\{[^}]*grid-template-columns/.test(PART_B), true, '主机 + 用户名是两列');
+  assert.equal(/\.dshmn-q\[aria-expanded=true\]/.test(PART_B), true, '问号要有展开态样式（点击后的反馈）');
+});
+
+// 这一轮只重做视觉骨架，字号阶梯换成宿主自己的网格（大小 / 行高 / 字重三条轴一起对）：
+//   页标题 18/26·600 · 判决标题 18/26·600 · 卡片标题 14/22·500 · 行标题 14/22·400
+//   字段标签 13/1.5·500（primary） · 说明 12/18 tertiary · chips 12/18 · 小读数 11/16
+// 宿主全树 0 处 11.5px，所以这一条同时钉死「不许再出现半档字号」。
+test('CSS 审计：字号阶梯落在宿主网格上，且全页没有半档字号', () => {
+  const rule = (cls) => new RegExp('\\.' + cls + '\\{[^}]*\\}').exec(PART_B)?.[0] ?? '';
+  const decl = (cls, prop) => new RegExp(prop + ':\\s*([^;}]+)').exec(rule(cls))?.[1]?.trim() ?? '';
+  const size = (cls) => {
+    const value = /^([\d.]+)px/.exec(decl(cls, 'font-size'));
+    return value === null ? NaN : Number(value[1]);
+  };
+  const ladder = {
+    pageTitle: size('dshmn-title'),
+    verdictTitle: size('dshmn-verdictTitle'),
+    cardTitle: size('dshmn-cardTitle'),
+    rowTitle: size('dshmn-rowTitle'),
+    label: size('dshmn-label'),
+    hint: size('dshmn-hint'),
+    chip: size('dshmn-segBtn'),
+    stamp: size('dshmn-stamp'),
+  };
+  assert.deepEqual(ladder, {
+    pageTitle: 18, verdictTitle: 18, cardTitle: 14, rowTitle: 14,
+    label: 13, hint: 12, chip: 12, stamp: 11,
+  }, '字号必须落在宿主网格上（18 / 14 / 13 / 12 / 11）');
+  // 行高与字重是同一套层级的一部分：只看字号会漏掉「字号没降但行高不在网格上」那种怪。
+  assert.deepEqual({
+    title: decl('dshmn-title', 'font-weight'),
+    titleLine: decl('dshmn-title', 'line-height'),
+    cardWeight: decl('dshmn-cardTitle', 'font-weight'),
+    cardLine: decl('dshmn-cardTitle', 'line-height'),
+    rowWeight: decl('dshmn-rowTitle', 'font-weight'),
+    rowLine: decl('dshmn-rowTitle', 'line-height'),
+    labelWeight: decl('dshmn-label', 'font-weight'),
+    labelLine: decl('dshmn-label', 'line-height'),
+    hintLine: decl('dshmn-hint', 'line-height'),
+    chipLine: decl('dshmn-segBtn', 'line-height'),
+    stampLine: decl('dshmn-stamp', 'line-height'),
+  }, {
+    title: '600', titleLine: '26px',
+    cardWeight: '500', cardLine: '22px',
+    rowWeight: '400', rowLine: '22px',
+    labelWeight: '500', labelLine: '1.5',
+    hintLine: '18px', chipLine: '18px', stampLine: '16px',
+  }, '行高与字重要和字号一起落在宿主网格上');
+  assert.equal(cssTextIncludesHalfStep(), false, '宿主全树 0 处 11.5px，这一页也不许留半档字号');
+});
+
+/** PART_B 里是否还有 11.5 这种半档字号（写成函数是为了让上面的断言读起来像一句话）。 */
+function cssTextIncludesHalfStep() {
+  return PART_B.includes('font-size:11.5px') || PART_B.includes('font-size: 11.5px');
+}
+
+test('视觉骨架：三张描边卡片 + 760 内容列，段头线与页脚线整块删掉', () => {
+  assert.equal((PART_B.match(/h\(Card, \{/g) ?? []).length, 3, '三张卡片：收件人 / 怎么发 / 什么时候发给我');
+  assert.equal(PART_B.includes('dshmn-group'), false, '旧的「段头 + 发丝线」分组必须整块删掉');
+  assert.match(PART_B, /\.dshmn-page\{[^}]*max-width:760px/, '内容列 max-width 760（宿主同款）');
+  assert.match(PART_B, /\.dshmn-page\{[^}]*margin:0 auto/, '内容列居中');
+  assert.match(PART_B, /\.dshmn-card\{[^}]*border:\.5px solid var\(--dsw-alias-border-l4\)/, '卡片靠 .5px 描边成立');
+  assert.match(PART_B, /\.dshmn-card\{[^}]*border-radius:20px/, '卡片圆角 20');
+  assert.match(PART_B, /\.dshmn-card\{[^}]*padding:14px 16px/, '卡片内边距 14 16');
+  assert.equal(/\.dshmn-groupHead\{[^}]*border-bottom/.test(PART_B), false, '段头不许再画线');
+  assert.equal(/\.dshmn-foot\{[^}]*border-top/.test(PART_B), false, '页脚不许再画线');
+  assert.match(PART_B, /\.dshmn-row\{[^}]*padding:16px 0/, '开关行用 16px 上下内边距（宿主网格）');
+  assert.match(PART_B, /\.dshmn-verdict \+ \.dshmn-card\{margin-top:16px\}/, '判决条与第一张卡片之间要有间距');
+  assert.match(PART_B, /\.dshmn-card \+ \.dshmn-card\{margin-top:12px\}/, '卡片之间 gap 12');
+  // 圆角只用宿主那几档；10 / 13 这种字面量一律不许再写。
+  const radii = [...PART_B.matchAll(/border-radius:\s*([\d.]+)px/g)].map((m) => Number(m[1]));
+  assert.deepEqual(radii.filter((value) => ![4, 8, 12, 16, 20, 28].includes(value)), [], '圆角只许 4/8/12/16/20/28');
+  assert.equal(PART_B.includes('border-radius:50%'), true, '问号是圆点（50% 不算字面量档位）');
+});
+
+test('CSS 审计：判决条是三态 hero，竖条与标题色都由 state token 决定', () => {
+  assert.equal(PART_B.includes('.dshmn-verdict[data-tone=done]{border-left-color:var(--dsw-alias-state-success-primary)}'), true);
+  assert.equal(PART_B.includes('.dshmn-verdict[data-tone=warning]{border-left-color:var(--dsw-alias-state-warn-primary)}'), true);
+  assert.equal(PART_B.includes('.dshmn-verdict[data-tone=idle]{border-left-color:var(--dsw-alias-label-tertiary)}'), true);
+  assert.match(PART_B, /\.dshmn-verdict\{[^}]*border-left:3px solid/, '左侧 3px 状态色竖条');
+  assert.match(PART_B, /\.dshmn-verdict\{[^}]*border-radius:20px/, '判决条圆角 20');
 });

@@ -1,7 +1,30 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { defaultConfig, DEFAULT_SENDER_NAME, parseRecipients, resolveBaseUrl, resolveSender, senderList, sessionLink, smtpAccountHint, smtpIssues, SMTP_PRESETS } from '../lib/notify/config.js';
+import z from '@deepseek-ai/schemastery';
+
+import {
+  defaultConfig,
+  isVolatileRef,
+  MailSchema,
+  parseRecipients,
+  resolveConfig,
+  smtpAccountHint,
+  smtpIssues,
+  SMTP_PRESETS,
+  MIN_DURATION_MS,
+  RATE_PER_MINUTE,
+  SETTLE_MS,
+} from '../lib/notify/config.js';
+// 设置页读的是**包入口**的导出（entry.fiber.runtime.Config），所以必须从入口验，
+// 不能只验 config.js 里那份（入口忘了再导出，设置页照样整页失联）。
+import { Config } from '../lib/index.js';
+
+/** cosmokit 的 volatile 引用协议键（与 cordis / schemastery 同一个全局符号）。 */
+const VOLATILE_WRITE = Symbol.for('cosmokit.volatile.write');
+
+/** 已整块删除的两条能力（发件人清单 / 邮件直达链接）留下的字段名。 */
+const REMOVED_FIELDS = ['senders', 'activeSender', 'senderName', 'fromAddress', 'linkEnabled', 'publicBaseUrl'];
 
 test('parseRecipients：一行一个，兼容逗号分号，去重去空、挑出非法项', () => {
   const { valid, invalid } = parseRecipients('a@x.com\nb@y.com, c@z.com; a@x.com\n\nnot-an-email\n');
@@ -11,29 +34,22 @@ test('parseRecipients：一行一个，兼容逗号分号，去重去空、挑�
   assert.deepEqual(parseRecipients(undefined), { valid: [], invalid: [] });
 });
 
-test('resolveBaseUrl：用户配置优先，其次 DSH_WEB_URL，去掉结尾斜杠', () => {
-  assert.equal(resolveBaseUrl({ publicBaseUrl: 'https://dsh.example.com/' }, 'http://127.0.0.1:3081'), 'https://dsh.example.com');
-  assert.equal(resolveBaseUrl({ publicBaseUrl: '  ' }, 'http://127.0.0.1:3081'), 'http://127.0.0.1:3081');
-  assert.equal(resolveBaseUrl({}, ''), '');
-});
-
-test('sessionLink：只拼链接，不做任何接收端处理', () => {
-  assert.equal(
-    sessionLink('http://127.0.0.1:3081', 'session-a25bd099'),
-    'http://127.0.0.1:3081/?session=session-a25bd099',
-  );
-  assert.equal(sessionLink('', 'session-x'), '');
-  assert.equal(sessionLink('http://h', ''), '');
-});
-
 test('默认配置：SMTP 是唯一的发送方式 + 不打断的节奏默认值', () => {
   const config = defaultConfig();
   assert.equal(config.enabled, true);
   assert.equal(config.includeSubagents, false);
-  assert.equal(config.linkEnabled, true);
-  assert.equal(config.settleMs, 1500);
-  assert.equal(config.minDurationMs, 2000);
-  assert.equal(config.ratePerMinute, 10);
+  // 发件人清单与「邮件直达链接」两条能力已整块删除：配置里不该再有它们的任何字段
+  for (const field of REMOVED_FIELDS) {
+    assert.equal(field in config, false, `${field} 已删除，不该再出现在配置里`);
+  }
+  // 节奏参数不再是配置字段（界面不暴露），改成模块级常量；值必须与原来的默认值一致
+  assert.equal(SETTLE_MS, 1500);
+  assert.equal(MIN_DURATION_MS, 2000);
+  assert.equal(RATE_PER_MINUTE, 10);
+  assert.equal('settleMs' in config, false, '合并窗口已硬编码，不该再出现在配置里');
+  assert.equal('minDurationMs' in config, false, '短任务下限已硬编码，不该再出现在配置里');
+  assert.equal('ratePerMinute' in config, false, '限流已硬编码，不该再出现在配置里');
+  assert.equal('statePath' in config, false, '投递账本已删除，不该再出现在配置里');
   assert.equal(config.smtpPasswordRef, 'DSH_MAIL_NOTIFY_SMTP_PASSWORD');
   assert.equal(config.smtpPort, 465);
   assert.equal(config.smtpSecure, 'auto');
@@ -91,37 +107,24 @@ test('预设表：每个预设都要有 name 与 domains，且 domains 与 user 
   }
 });
 
-test('senderList：老配置迁移成清单，新清单优先，去空去重', () => {
-  // 老配置（只有 senderName / fromAddress）自动变成唯一一条，用户不用重填
-  assert.deepEqual(senderList({ senderName: '旧名', fromAddress: 'a@x.com' }), [{ name: '旧名', address: 'a@x.com' }]);
-  // 旧地址为空时**不迁移**：那时旧行为本来就是"回退默认"，凭空造一条反而改变行为
-  assert.deepEqual(senderList({ senderName: '旧名', fromAddress: '' }), []);
-  assert.deepEqual(senderList({}), []);
-  // 新清单非空就作数，旧字段不再参与（否则删掉的会从旧字段复活）
-  assert.deepEqual(
-    senderList({ senders: [{ name: '新', address: 'b@y.com' }], senderName: '旧名', fromAddress: 'a@x.com' }),
-    [{ name: '新', address: 'b@y.com' }],
-  );
-  // 去空（没地址的条目等于没配置）、按地址去重（不分大小写）、两头空白都去掉
-  assert.deepEqual(
-    senderList({ senders: [{ address: '   ' }, { name: ' A ', address: ' a@x.com ' }, { name: 'B', address: 'A@X.com' }] }),
-    [{ name: 'A', address: 'a@x.com' }],
-  );
-});
-
-test('resolveSender：选中项按地址匹配，找不到退回第一条，空清单回落到旧字段', () => {
-  const list = { senders: [{ name: 'A', address: 'a@x.com' }, { name: 'B', address: 'b@y.com' }] };
-  assert.deepEqual(resolveSender({ ...list, activeSender: 'b@y.com' }), { name: 'B', address: 'b@y.com' });
-  assert.deepEqual(resolveSender({ ...list, activeSender: 'B@Y.COM' }), { name: 'B', address: 'b@y.com' }, '按地址匹配要大小写不敏感');
-  assert.deepEqual(resolveSender({ ...list, activeSender: 'gone@z.com' }), { name: 'A', address: 'a@x.com' }, '选中的被删了要退回第一条，而不是留空');
-  assert.deepEqual(resolveSender(list), { name: 'A', address: 'a@x.com' }, '没设过 activeSender 就用第一条');
-  // 某条没写显示名 → 用配置里的 senderName 兜底，再兜底到默认名
-  assert.deepEqual(resolveSender({ senders: [{ address: 'a@x.com' }], senderName: '兜底名' }), { name: '兜底名', address: 'a@x.com' });
-  assert.deepEqual(resolveSender({ senders: [{ address: 'a@x.com' }], senderName: '' }), { name: DEFAULT_SENDER_NAME, address: 'a@x.com' });
-  // 清单为空、旧字段也为空 → 默认显示名 + 空地址（空地址等于"用 SMTP 用户名"，行为与加清单之前一致）
-  assert.deepEqual(resolveSender({}), { name: DEFAULT_SENDER_NAME, address: '' });
-  // 老配置整条链路：一行都不用改
-  assert.deepEqual(resolveSender({ senderName: '旧名', fromAddress: 'a@x.com' }), { name: '旧名', address: 'a@x.com' });
+test('schema 声明的字段里不再有发件人/链接；老配置残留同名键也照常解析', () => {
+  // schema 自己（空输入解析出来的键集合）不该再有这 6 个字段
+  const declared = Object.keys(resolveConfig({}));
+  for (const field of REMOVED_FIELDS) {
+    assert.equal(declared.includes(field), false, `${field} 已从 schema 删除`);
+  }
+  // 老 settings.yaml 里残留的键不影响其余字段的解析：删字段不能把老配置整份弄坏
+  const legacy = resolveConfig({
+    recipients: 'me@qq.com',
+    senders: [{ name: '旧', address: 'a@x.com' }],
+    activeSender: 'a@x.com',
+    senderName: '旧名',
+    fromAddress: 'a@x.com',
+    linkEnabled: true,
+    publicBaseUrl: 'http://127.0.0.1:3081',
+  });
+  assert.equal(legacy.recipients, 'me@qq.com');
+  assert.deepEqual(parseRecipients(legacy.recipients).valid, ['me@qq.com']);
 });
 
 test('smtpIssues：只查 SMTP 自己的必填项，不越界报别人的问题', () => {
@@ -129,6 +132,95 @@ test('smtpIssues：只查 SMTP 自己的必填项，不越界报别人的问题'
   assert.match(smtpIssues({ smtpHost: '', smtpUser: 'me@qq.com' })[0], /主机/);
   assert.match(smtpIssues({ smtpHost: 'smtp.qq.com', smtpUser: '' })[0], /用户名/);
   assert.equal(smtpIssues({ smtpHost: '', smtpUser: '' }).length, 2, '两个都缺就都报出来');
-  // 发件人地址不在这里报：拿不到时 SMTP 会退回 smtpUser，那是合法的
-  assert.deepEqual(smtpIssues({ smtpHost: 'smtp.qq.com', smtpUser: 'me@qq.com', senders: [] }), []);
+  // 发件地址固定用 smtpUser，所以没有"发件人地址为空"这类单独的问题
+  assert.deepEqual(smtpIssues({ smtpHost: 'smtp.qq.com', smtpUser: 'me@qq.com' }), []);
+});
+
+// ---------------------------------------------------------------------------
+// 设置页契约（ADR 0005）：入口导出 Config + 15 个字段全部 .volatile()
+//
+// 两件事少任何一件，设置页都会整页失联，但坏的位置不同：
+//   * 没导出 Config   → dsh-settings 的 describe() 直接跳过本 entry（读不到也写不进）
+//   * 字段没 volatile → volatileForm() 返回 undefined，同样被跳过；写回报 not volatile
+// ---------------------------------------------------------------------------
+
+/** 删字段（发件人清单 / 直达链接 / 节奏参数 / 投递账本）之后的终态默认值。 */
+const EXPECTED_DEFAULTS = {
+  enabled: true,
+  recipients: '',
+  includeSubagents: false,
+  smtpHost: '',
+  smtpPort: 465,
+  smtpSecure: 'auto',
+  smtpUser: '',
+  smtpPasswordRef: 'DSH_MAIL_NOTIFY_SMTP_PASSWORD',
+  notifyCompleted: true,
+  notifyError: true,
+  notifyBlocked: true,
+  notifyAbortedByUser: false,
+  notifyInterrupted: false,
+  notifyMaxTokens: false,
+  notifyApproval: true,
+};
+
+test('入口导出 Config：包入口可见、是 schemastery schema、与 MailSchema 是同一份', () => {
+  assert.ok(Config, 'lib/index.js 必须在模块顶层导出 Config（settings 只读 entry.fiber.runtime.Config）');
+  assert.equal(Config, MailSchema, '入口的 Config 必须是 config.js 里那份 MailSchema，不许复制一份');
+  assert.equal(Config instanceof z, true, 'Config 必须是 schemastery schema 实例');
+  assert.equal(Config.type, 'object', 'Config 必须是 object schema');
+  assert.equal(typeof Config['~standard']?.validate, 'function', 'settings 走 standard-schema 校验');
+  // 不是空壳：真能解析出完整默认值
+  assert.deepEqual(resolveConfig(Config({})), EXPECTED_DEFAULTS);
+});
+
+test('Config 的 15 个字段全部 volatile（少一个，设置页就少一个能写的字段）', () => {
+  const fields = Object.keys(Config.dict);
+  assert.equal(fields.length, 15, '字段数必须正好 15');
+  assert.deepEqual(fields.slice().sort(), Object.keys(EXPECTED_DEFAULTS).sort(), '字段集合必须与终态一致（不多不少）');
+  for (const [name, field] of Object.entries(Config.dict)) {
+    assert.equal(field.meta?.volatile, true, `${name} 必须标 .volatile()，否则 volatileForm() 会跳过整页`);
+  }
+  // toJSON() 也要带 meta.volatile：settings 服务按它投影可写表单
+  const json = Config.toJSON();
+  const root = json.refs[String(json.uid)];
+  for (const [name, index] of Object.entries(root.dict)) {
+    assert.equal(json.refs[String(index)].meta?.volatile, true, `toJSON() 里 ${name} 缺 meta.volatile`);
+  }
+});
+
+test('默认值：15 个字段与删字段前的终态完全一致（一个都不许改）', () => {
+  assert.deepEqual(defaultConfig(), EXPECTED_DEFAULTS);
+  assert.deepEqual(resolveConfig({}), EXPECTED_DEFAULTS);
+  assert.deepEqual(resolveConfig(undefined), EXPECTED_DEFAULTS);
+  // schema 自己声明的默认值（设置页「恢复默认」读的就是这一份）
+  const declared = Object.fromEntries(Object.entries(Config.dict).map(([name, field]) => [name, field.meta?.default]));
+  assert.deepEqual(declared, EXPECTED_DEFAULTS);
+});
+
+test('resolveConfig：能拆 volatile 引用，且每次都读引用里的当前值（活配置的真相）', () => {
+  /** 与 cordis 同形的 volatile 引用：身份不变，值可原地改写。 */
+  const ref = (initial) => {
+    let current = initial;
+    return { get: () => current, [VOLATILE_WRITE]: (next) => { current = next; } };
+  };
+
+  const live = { smtpHost: ref('smtp.qq.com'), smtpPort: ref(465), enabled: ref(true) };
+  const first = resolveConfig(live);
+  assert.equal(first.smtpHost, 'smtp.qq.com');
+  assert.equal(first.smtpPort, 465);
+  assert.equal(first.enabled, true);
+  // 出参永远是裸值：调用方（发信判定 / 渲染 / 测试邮件）不必再关心这层壳
+  assert.equal(isVolatileRef(first.smtpHost), false);
+  assert.equal(typeof first.smtpHost, 'string');
+
+  // 原地改写引用（= 设置页保存的路径）之后，再读就是新值；"启动时快照"会在这里露馅
+  live.smtpHost[VOLATILE_WRITE]('smtp.changed.example.com');
+  assert.equal(resolveConfig(live).smtpHost, 'smtp.changed.example.com');
+
+  // 入参不许被改写：它可能是 loader 正在用的那份 config
+  assert.equal(isVolatileRef(live.smtpHost), true);
+  assert.deepEqual(Object.keys(live), ['smtpHost', 'smtpPort', 'enabled']);
+
+  // 回归护栏：引用直接喂回 schema 会校验失败，所以 resolveConfig 必须先拆壳
+  assert.throws(() => MailSchema(live), /expected (string|boolean) but got \[object Object\]/);
 });

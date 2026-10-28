@@ -1,4 +1,4 @@
-// dsh-notify-p · 干跑脚本（不连邮箱，把整条渲染链路跑给你看）
+// dsh-lookout · 干跑脚本（不连邮箱，把整条渲染链路跑给你看）
 //
 // 用法：node test/dryrun.mjs
 // 它用真实的 policy + render 走一遍：事件载荷 → 判定 → 渲染 → 打印（最后一步用假发送器，
@@ -18,9 +18,6 @@ const logger = {
 const config = {
   ...defaultConfig(),
   recipients: 'you@example.com',
-  senderName: 'DSH 通知 / DSH Notification',
-  fromAddress: 'me@example.com',
-  publicBaseUrl: 'http://127.0.0.1:3081',
 };
 
 const session = {
@@ -111,8 +108,6 @@ for (const item of cases) {
     durationMs: item.durationMs,
     errorText: item.detail ?? classified.detail ?? '',
     approval: item.approval ? { toolName: item.event.data.toolName, reason: item.event.data.reason } : undefined,
-    config,
-    baseUrl: config.publicBaseUrl,
   });
 
   console.log(`→ 判定：发送（${classified.outcome}）`);

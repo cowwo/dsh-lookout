@@ -9,32 +9,57 @@ import { mkdtempSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { parseArgs, readSettingsSection, readCredentialRefs, resolveCredentialFrom, dshHome } from './send-test.mjs';
+import {
+  describeConfigSource,
+  dshHome,
+  overridesFromFlags,
+  parseArgs,
+  profilePatchFiles,
+  readCredentialRefs,
+  readProfileConfig,
+  resolveCredentialFrom,
+} from './send-test.mjs';
 import { sendTestMail, toDeliveryView } from '../lib/notify/test-send.js';
-import { defaultConfig, smtpIssues } from '../lib/notify/config.js';
+import { DEFAULT_SENDER_NAME, defaultConfig, resolveConfig, smtpIssues } from '../lib/notify/config.js';
 import { checkSenderConfig, resolveFrom, sendMail } from '../lib/notify/send/index.js';
 import { startFakeSmtp } from './fake-smtp.mjs';
 
-test('resolveFrom：走发件人清单解析；空清单回落到旧字段与 SMTP 用户名', () => {
-  // 清单里选中的那条（按 activeSender 的地址选，不是按顺序取第一条）
+test('resolveFrom：发件地址固定取 smtpUser，显示名固定', () => {
+  assert.equal(resolveFrom({ smtpUser: 'me@qq.com' }), `${DEFAULT_SENDER_NAME} <me@qq.com>`);
+  assert.equal(resolveFrom({ smtpUser: '  me@qq.com  ' }), `${DEFAULT_SENDER_NAME} <me@qq.com>`, '两头空白不算地址');
+  assert.equal(resolveFrom({ smtpUser: '' }), DEFAULT_SENDER_NAME, '连用户名都没有就只给显示名');
+  assert.equal(resolveFrom({}), DEFAULT_SENDER_NAME);
+  // 发件人清单已整块删除：旧字段即使还留在配置里也不参与解析
   assert.equal(
-    resolveFrom({ senders: [{ name: '运营', address: 'ops@x.com' }, { name: '私人', address: 'me@y.com' }], activeSender: 'me@y.com' }),
-    '私人 <me@y.com>',
+    resolveFrom({
+      smtpUser: 'me@qq.com',
+      senders: [{ name: '运营', address: 'ops@x.com' }],
+      activeSender: 'ops@x.com',
+      senderName: '旧名',
+      fromAddress: 'a@x.com',
+    }),
+    `${DEFAULT_SENDER_NAME} <me@qq.com>`,
   );
-  // 老配置（只有 senderName / fromAddress）行为与加清单之前完全一致
-  assert.equal(resolveFrom({ senderName: '旧名', fromAddress: 'a@x.com' }), '旧名 <a@x.com>');
-  // 清单与旧地址都空 → 退回 smtpUser（SMTP 是唯一通道，这条回退永远成立）
-  assert.equal(resolveFrom({ senderName: '通知', smtpUser: 'me@qq.com' }), '通知 <me@qq.com>');
-  assert.equal(resolveFrom({ senderName: '通知', smtpUser: '' }), '通知', '连用户名都没有就只给显示名');
-  // 条目没写显示名 → 用配置里的显示名兜底
-  assert.equal(resolveFrom({ senders: [{ address: 'a@x.com' }], senderName: '默认名' }), '默认名 <a@x.com>');
 });
 
-/** 造一个临时 DSH home。 */
-function tempHome(settings, credentials) {
+/** 造一个临时 DSH home；给了 credentials 就顺手写凭据库。 */
+function tempHome(credentials) {
   const home = mkdtempSync(join(tmpdir(), 'dsh-notify-p-cli-'));
-  if (settings !== undefined) writeFileSync(join(home, 'settings.yaml'), settings, 'utf8');
   if (credentials !== undefined) writeFileSync(join(home, '.credentials.yaml'), credentials, 'utf8');
+  return home;
+}
+
+/**
+ * 造一个带 profiles/<name>/cordis.patch.yml 的临时 DSH home。
+ * @param {Record<string, string[]>} profiles profile 名 → 该文件的内容片段
+ * @returns {string} DSH home
+ */
+function tempProfileHome(profiles) {
+  const home = mkdtempSync(join(tmpdir(), 'dsh-notify-p-cli-'));
+  for (const [name, chunks] of Object.entries(profiles)) {
+    mkdirSync(join(home, 'profiles', name), { recursive: true });
+    writeFileSync(join(home, 'profiles', name, 'cordis.patch.yml'), chunks.join(''), 'utf8');
+  }
   return home;
 }
 
@@ -42,18 +67,23 @@ test('CLI：参数解析认得所有开关，未知参数被单独收集', () =>
   const { flags, unknown } = parseArgs([
     '--to', 'me@qq.com', '--smtp-host', 'smtp.qq.com',
     '--smtp-port', '465', '--smtp-secure', 'tls', '--smtp-user', 'me@qq.com',
-    '--from', 'me@qq.com', '--sender-name', 'DSH', '--dry-run', '--json', '--nope',
+    '--dry-run', '--json', '--nope',
   ]);
   assert.equal(flags.recipients, 'me@qq.com');
   assert.equal(flags.smtpHost, 'smtp.qq.com');
   assert.equal(flags.smtpPort, 465);
   assert.equal(flags.smtpSecure, 'tls');
   assert.equal(flags.smtpUser, 'me@qq.com');
-  assert.equal(flags.fromAddress, 'me@qq.com');
-  assert.equal(flags.senderName, 'DSH');
   assert.equal(flags.dryRun, true);
   assert.equal(flags.json, true);
   assert.deepEqual(unknown, ['--nope']);
+});
+
+test('CLI：--from / --sender-name 随发件人清单一起删除，成了未知参数', () => {
+  const { flags, unknown } = parseArgs(['--from', 'a@x.com', '--sender-name', 'DSH']);
+  assert.deepEqual(unknown, ['--from', 'a@x.com', '--sender-name', 'DSH']);
+  assert.equal('fromAddress' in flags, false);
+  assert.equal('senderName' in flags, false);
 });
 
 test('CLI：--help 单独识别，不吞其它参数', () => {
@@ -62,19 +92,78 @@ test('CLI：--help 单独识别，不吞其它参数', () => {
   assert.deepEqual(unknown, []);
 });
 
-test('CLI：读 settings.yaml 的插件段；文件缺失/损坏都退化成空对象', () => {
-  const good = tempHome('other-plugin:\n  a: 1\ndsh-notify-p:\n  transport: smtp\n  recipients: me@qq.com\n');
-  assert.deepEqual(readSettingsSection(good), { transport: 'smtp', recipients: 'me@qq.com' });
+test('CLI：从 profile 的 cordis.patch.yml 取本插件 config（按内容认，不按 id 认）', () => {
+  const home = tempProfileHome({
+    web: [
+      '- id: dsh-notifier\n  config:\n    admin:\n      enabled: true\n      port: 3091\n',
+      '- id: 谁也不是的名字\n  config:\n    enabled: true\n    smtpHost: smtp.qq.com\n    smtpUser: me@qq.com\n',
+    ],
+  });
+  const found = readProfileConfig(home);
+  assert.equal(found.file, join(home, 'profiles', 'web', 'cordis.patch.yml'));
+  assert.equal(found.profile, 'web');
+  assert.equal(found.entryId, '谁也不是的名字');
+  assert.deepEqual(found.config, { enabled: true, smtpHost: 'smtp.qq.com', smtpUser: 'me@qq.com' });
+  // 输出里必须能看出"配置来自哪个文件"
+  assert.match(describeConfigSource(found), /cordis\.patch\.yml/);
+  assert.match(describeConfigSource(found), /web/);
+  assert.match(describeConfigSource(found), /谁也不是的名字/);
+});
 
+test('CLI：只写了 smtpPasswordRef 的 entry 也算本插件', () => {
+  const home = tempProfileHome({ web: ['- id: x\n  config:\n    smtpPasswordRef: MY_MAIL_CODE\n'] });
+  assert.deepEqual(readProfileConfig(home).config, { smtpPasswordRef: 'MY_MAIL_CODE' });
+});
+
+test('CLI：多个 profile 时按名字排序取第一份命中的', () => {
+  const home = tempProfileHome({
+    beta: ['- id: b\n  config:\n    smtpHost: smtp.beta.example\n'],
+    alpha: ['- id: a\n  config:\n    smtpHost: smtp.alpha.example\n'],
+  });
+  assert.deepEqual(profilePatchFiles(home), [
+    join(home, 'profiles', 'alpha', 'cordis.patch.yml'),
+    join(home, 'profiles', 'beta', 'cordis.patch.yml'),
+  ]);
+  const found = readProfileConfig(home);
+  assert.equal(found.profile, 'alpha');
+  assert.equal(found.config.smtpHost, 'smtp.alpha.example');
+});
+
+test('CLI：找不到 profile 配置就明说跳过；旧的单文件配置不再参与', () => {
   const missing = mkdtempSync(join(tmpdir(), 'dsh-notify-p-cli-'));
-  assert.deepEqual(readSettingsSection(missing), {}, '没有 settings.yaml 时不该抛');
+  assert.deepEqual(profilePatchFiles(missing), []);
+  const empty = readProfileConfig(missing);
+  assert.equal(empty.file, null);
+  assert.deepEqual(empty.config, {});
+  assert.match(describeConfigSource(empty), /未找到/);
 
-  const broken = tempHome('dsh-notify-p: [unclosed\n');
-  assert.deepEqual(readSettingsSection(broken), {}, 'YAML 坏了也要退化成空对象');
+  // 只剩改名前的旧配置：绝不能被当成活跃配置源
+  const legacy = mkdtempSync(join(tmpdir(), 'dsh-notify-p-cli-'));
+  writeFileSync(join(legacy, 'settings.yaml'), 'dsh-notify-p:\n  smtpHost: smtp.legacy.example\n', 'utf8');
+  assert.equal(readProfileConfig(legacy).file, null);
+
+  const broken = tempProfileHome({ web: ['- id: x\n  config: [unclosed\n'] });
+  assert.equal(readProfileConfig(broken).file, null, 'YAML 坏了要退化成空，不能抛');
+
+  const unrelated = tempProfileHome({ web: ['- id: ui-chat\n  config:\n    transcriptView: compact\n'] });
+  assert.equal(readProfileConfig(unrelated).file, null, '没有 smtpHost / smtpPasswordRef 的 entry 不算本插件');
+});
+
+test('CLI：命令行覆盖层叠在文件配置之上，且只收这 5 个字段', () => {
+  const home = tempProfileHome({
+    web: ['- id: lookout\n  config:\n    smtpHost: smtp.qq.com\n    smtpPort: 465\n    recipients: file@qq.com\n'],
+  });
+  const { flags } = parseArgs(['--to', 'cli@qq.com', '--smtp-port', '587', '--dry-run']);
+  const overrides = overridesFromFlags(flags);
+  assert.deepEqual(overrides, { recipients: 'cli@qq.com', smtpPort: 587 }, '--dry-run 这类开关不该进配置');
+  const merged = resolveConfig({ ...readProfileConfig(home).config, ...overrides });
+  assert.equal(merged.smtpHost, 'smtp.qq.com', '文件里的值要保留');
+  assert.equal(merged.smtpPort, 587, '命令行优先');
+  assert.equal(merged.recipients, 'cli@qq.com', '命令行优先');
 });
 
 test('CLI：读凭据库的 refs；records 段不算凭据', () => {
-  const home = tempHome(undefined, [
+  const home = tempHome([
     'version: 1',
     'records:',
     '  client-connection/browser-session:',
