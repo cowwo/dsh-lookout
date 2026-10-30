@@ -53,6 +53,7 @@ const THEME_TOKENS = new Set([
   '--dsw-alias-state-success-secondary', '--dsw-alias-state-success-tertiary', '--dsw-alias-state-warn-label',
   '--dsw-alias-state-warn-primary', '--dsw-alias-state-warn-secondary', '--dsw-alias-state-warn-tertiary',
   '--dsw-alias-toast-bg', '--dsw-alias-tooltip-bg',
+  '--dsw-alias-settings-card-fill', '--dsw-alias-settings-card-stroke',
 ]);
 
 /**
@@ -254,7 +255,7 @@ test('源码护栏：客户端半边不再有 log / resend 通道的痕迹', () 
 
 test('源码护栏：每个开关的可访问名都来自文案，而不是字段 key', () => {
   assert.equal(/\blabel:\s*key\b/.test(SOURCE), false, 'aria-label 不能直接用字段 key');
-  // 开关行改由页内 outcomeRow 拼（说明收进问号），可访问名从"标题文案键"来——
+  // 开关行改由页内 eventCell 拼（说明常显在格子下方），可访问名从"标题文案键"来——
   // 仍然是文案、不是字段名，这一条盯的就是这个区别。
   assert.equal(/label:\s*t\(/.test(SOURCE), true, '开关的可访问名必须走文案');
 });
@@ -294,6 +295,15 @@ test('纯函数：deriveStatus 真值表覆盖每个状态分支', async () => {
   // 判定顺序：先关、再收件人、再 SMTP 的必填项
   assert.equal(deriveStatus({ ...base, enabled: false, recipientCount: 0, host: '' }), 'disabled');
   assert.equal(deriveStatus({ ...base, recipientCount: 0, host: '' }), 'needRecipients');
+
+  // 本轮新增一档：8 个事件全关 = 发信也不会发生，必须排在"缺配置"前面；
+  // 但总开关关闭仍然压住它（关着就是关着，不再谈事件）。
+  assert.equal(deriveStatus({ ...base, eventsOn: 0 }), 'allOff');
+  assert.equal(deriveStatus({ ...base, eventsOn: 0, credentialConfigured: false }), 'allOff', '事件全关压过缺凭据');
+  assert.equal(deriveStatus({ ...base, eventsOn: 0, recipientCount: 0 }), 'allOff', '事件全关压过缺收件人');
+  assert.equal(deriveStatus({ ...base, enabled: false, eventsOn: 0 }), 'disabled', '总开关关闭压过事件全关');
+  assert.equal(deriveStatus({ ...base, eventsOn: 1 }), 'ready', '开了一个事件就不算全关');
+  assert.equal(deriveStatus({ ...base, eventsOn: 8 }), 'ready');
 });
 
 test('纯函数：预设匹配与按邮箱猜预设', async () => {
@@ -564,21 +574,44 @@ test('源码护栏：端口输入不接受非法字符（Number("46a") 是 NaN�
 
 // ── 本轮：视觉与信息架构简化（中等档）────────────────────────────────────────
 // 结构改动要留下痕迹，否则下一轮很容易"又长回去"。
-test('源码护栏：BUILD 升到 ui17，判决条的保存组与旧折叠包装已删干净', () => {
-  assert.equal(PART_B.includes("const BUILD = 'ui17';"), true, 'BUILD 必须升到 ui17（DOM 上的 data-build 是唯一能看出加载了哪一版的地方）');
+test('源码护栏：BUILD 升到 ui18，全页零折叠（折叠与问号整块删干净）', () => {
+  assert.equal(PART_B.includes("const BUILD = 'ui18';"), true, 'BUILD 必须升到 ui18（DOM 上的 data-build 是唯一能看出加载了哪一版的地方）');
   assert.equal(PART_B.includes('dshmn-verdictActions'), false, '判决条里的保存组（DOM + 样式）必须整块删掉');
   assert.equal(PART_B.includes('dshmn-disclose'), false, '旧折叠包装的样式与结构都不该留');
-  assert.equal(PART_B.includes('function Disclosure('), false, '旧折叠组件已删（两处折叠都走页内 foldHead）');
-  assert.equal(PART_B.includes('function Row('), false, '旧 Row 组件已删（开关行改成页内 outcomeRow）');
+  assert.equal(PART_B.includes('function Disclosure('), false, '旧折叠组件已删');
+  assert.equal(PART_B.includes('function Row('), false, '旧 Row 组件已删（开关行改成事件格子）');
   assert.equal(PART_B.includes("h('header', { className: 'dshmn-head' }"), true, '页头是一个 header 容器（左标题右保存组）');
-  assert.equal(/\.dshmn-chips\{[^}]*overflow-x:auto/.test(PART_B), true, '7 个预设必须排成一行横向滚动');
-  assert.equal(/\.dshmn-two\{[^}]*grid-template-columns/.test(PART_B), true, '主机 + 用户名是两列');
-  assert.equal(/\.dshmn-q\[aria-expanded=true\]/.test(PART_B), true, '问号要有展开态样式（点击后的反馈）');
+  // 零折叠：折叠标题、问号、开合状态、两处折叠各自的文案与状态一起消失。
+  for (const ghost of ['dshmn-fold', 'foldHead', 'dshmn-q', 'aria-expanded', 'aria-controls',
+    'hint.show', 'hint.hide', 'showMoreOutcomes', 'moreOpen', 'openHints',
+    'transport.more', 'outcomes.more', 'DEFAULT_TRANSPORT']) {
+    assert.equal(PART_B.includes(ghost), false, ghost + ' 属于已删除的折叠/问号交互');
+  }
+  // 骨架：吸顶页头 + 吸底保存条 + 两组栅格。
+  assert.match(PART_B, /\.dshmn-head\{[^}]*position:sticky;top:0/, '页头必须吸顶（滚动时常驻）');
+  // 吸顶块必须自带**不透明**底色，否则内容会从底下透出来；
+  // 而且要与宿主设置面板同层（bg-layer-2），用 bg-base 会在暗色下显出一条深色带。
+  assert.match(PART_B, /\.dshmn-head\{[^}]*background:var\(--dsw-alias-bg-layer-2\)/, '吸顶页头要自带与面板同层的底色');
+  assert.equal(/background:var\(--dsw-alias-bg-base\)/.test(PART_B), false, '吸顶块不许用 bg-base（暗色下与面板不同色，会出现色带）');
+  assert.match(PART_B, /\.dshmn-head\{[^}]*padding:12px 0/, '吸顶页头要自带内边距');
+  assert.match(PART_B, /\.dshmn-savebar\{[^}]*position:sticky;bottom:0/, '吸底条常驻底部');
+  assert.match(PART_B, /\.dshmn-savebar\{[^}]*background:var\(--dsw-alias-bg-layer-2\)/, '吸底条同样要自带与面板同层的底色');
+  assert.match(PART_B, /\.dshmn-smtpGrid\{[^}]*grid-template-columns:minmax\(0,1fr\) 88px 104px minmax\(0,1fr\)/,
+    '主机 / 端口 / 加密 / 用户名宽屏一行四列（主机与用户名吃剩余宽度）');
+  assert.match(PART_B, /@media \(max-width:560px\)\{[\s\S]*?\.dshmn-smtpGrid\{grid-template-columns:minmax\(0,1fr\) minmax\(0,1fr\)\}/,
+    '窄屏降为两行两列');
+  assert.match(PART_B, /\.dshmn-events\{[^}]*grid-template-columns:repeat\(3,minmax\(0,1fr\)\)/, '8 个事件开关三列网格');
+  assert.equal((PART_B.match(/h\(Segment, \{/g) ?? []).length, 2, 'chips：预设 map + 「其他」两处调用点');
+  assert.equal(PART_B.includes("'data-event': field"), true, '每个事件开关要带 data-event 抓手');
+  assert.equal(PART_B.includes("'data-master': 'true'"), true, '总开关要带 data-master 抓手');
+  assert.equal(PART_B.includes("t('notify.masterHint')"), true, '总开关要带一行说明');
+  assert.equal(PART_B.includes("id: 'dshmn-master'"), true, '总开关要能被「去填写」定位');
 });
 
-// 这一轮只重做视觉骨架，字号阶梯换成宿主自己的网格（大小 / 行高 / 字重三条轴一起对）：
-//   页标题 18/26·600 · 判决标题 18/26·600 · 卡片标题 14/22·500 · 行标题 14/22·400
-//   字段标签 13/1.5·500（primary） · 说明 12/18 tertiary · chips 12/18 · 小读数 11/16
+// 这一轮对齐宿主规范，字号阶梯里有两档动了：
+//   页头说明 12/18 → 13/20；字段标签行高 1.5 → 20px；chips 12 → 13。
+// 其余不动：页标题 18/26·600 · 判决标题 18/26·600 · 结论句 14/22 · 卡片标题 14/22·500
+//   行标题 14/22·400 · 说明 12/18 · 人话摘要 12/18 · 小读数 11/16。
 // 宿主全树 0 处 11.5px，所以这一条同时钉死「不许再出现半档字号」。
 test('CSS 审计：字号阶梯落在宿主网格上，且全页没有半档字号', () => {
   const rule = (cls) => new RegExp('\\.' + cls + '\\{[^}]*\\}').exec(PART_B)?.[0] ?? '';
@@ -589,26 +622,31 @@ test('CSS 审计：字号阶梯落在宿主网格上，且全页没有半档字�
   };
   const ladder = {
     pageTitle: size('dshmn-title'),
+    lead: size('dshmn-lead'),
     verdictTitle: size('dshmn-verdictTitle'),
+    verdictWhy: size('dshmn-verdictWhy'),
+    summary: size('dshmn-verdictSummary'),
     cardTitle: size('dshmn-cardTitle'),
-    rowTitle: size('dshmn-rowTitle'),
+    eventTitle: size('dshmn-eventTitle'),
+    eventNote: size('dshmn-eventNote'),
     label: size('dshmn-label'),
     hint: size('dshmn-hint'),
     chip: size('dshmn-segBtn'),
     stamp: size('dshmn-stamp'),
   };
   assert.deepEqual(ladder, {
-    pageTitle: 18, verdictTitle: 18, cardTitle: 14, rowTitle: 14,
-    label: 13, hint: 12, chip: 12, stamp: 11,
+    pageTitle: 18, lead: 13, verdictTitle: 18, verdictWhy: 14, summary: 12, cardTitle: 14,
+    eventTitle: 14, eventNote: 12, label: 13, hint: 12, chip: 13, stamp: 11,
   }, '字号必须落在宿主网格上（18 / 14 / 13 / 12 / 11）');
   // 行高与字重是同一套层级的一部分：只看字号会漏掉「字号没降但行高不在网格上」那种怪。
   assert.deepEqual({
     title: decl('dshmn-title', 'font-weight'),
     titleLine: decl('dshmn-title', 'line-height'),
+    leadLine: decl('dshmn-lead', 'line-height'),
     cardWeight: decl('dshmn-cardTitle', 'font-weight'),
     cardLine: decl('dshmn-cardTitle', 'line-height'),
-    rowWeight: decl('dshmn-rowTitle', 'font-weight'),
-    rowLine: decl('dshmn-rowTitle', 'line-height'),
+    eventWeight: decl('dshmn-eventTitle', 'font-weight'),
+    eventLine: decl('dshmn-eventTitle', 'line-height'),
     labelWeight: decl('dshmn-label', 'font-weight'),
     labelLine: decl('dshmn-label', 'line-height'),
     hintLine: decl('dshmn-hint', 'line-height'),
@@ -616,9 +654,10 @@ test('CSS 审计：字号阶梯落在宿主网格上，且全页没有半档字�
     stampLine: decl('dshmn-stamp', 'line-height'),
   }, {
     title: '600', titleLine: '26px',
+    leadLine: '20px',
     cardWeight: '500', cardLine: '22px',
-    rowWeight: '400', rowLine: '22px',
-    labelWeight: '500', labelLine: '1.5',
+    eventWeight: '400', eventLine: '22px',
+    labelWeight: '500', labelLine: '20px',
     hintLine: '18px', chipLine: '18px', stampLine: '16px',
   }, '行高与字重要和字号一起落在宿主网格上');
   assert.equal(cssTextIncludesHalfStep(), false, '宿主全树 0 处 11.5px，这一页也不许留半档字号');
@@ -630,22 +669,38 @@ function cssTextIncludesHalfStep() {
 }
 
 test('视觉骨架：三张描边卡片 + 760 内容列，段头线与页脚线整块删掉', () => {
-  assert.equal((PART_B.match(/h\(Card, \{/g) ?? []).length, 3, '三张卡片：收件人 / 怎么发 / 什么时候发给我');
+  assert.equal((PART_B.match(/h\(Card, \{/g) ?? []).length, 3, '三张卡片：收件人 / 发信方式 / 通知时机');
   assert.equal(PART_B.includes('dshmn-group'), false, '旧的「段头 + 发丝线」分组必须整块删掉');
   assert.match(PART_B, /\.dshmn-page\{[^}]*max-width:760px/, '内容列 max-width 760（宿主同款）');
   assert.match(PART_B, /\.dshmn-page\{[^}]*margin:0 auto/, '内容列居中');
-  assert.match(PART_B, /\.dshmn-card\{[^}]*border:\.5px solid var\(--dsw-alias-border-l4\)/, '卡片靠 .5px 描边成立');
+  assert.match(PART_B, /\.dshmn-card\{[^}]*border:\.5px solid var\(--dsw-alias-settings-card-stroke\)/,
+    '卡片描边用宿主 settings 的 card-stroke（值同 border-l4）');
   assert.match(PART_B, /\.dshmn-card\{[^}]*border-radius:20px/, '卡片圆角 20');
   assert.match(PART_B, /\.dshmn-card\{[^}]*padding:14px 16px/, '卡片内边距 14 16');
   assert.equal(/\.dshmn-groupHead\{[^}]*border-bottom/.test(PART_B), false, '段头不许再画线');
   assert.equal(/\.dshmn-foot\{[^}]*border-top/.test(PART_B), false, '页脚不许再画线');
-  assert.match(PART_B, /\.dshmn-row\{[^}]*padding:16px 0/, '开关行用 16px 上下内边距（宿主网格）');
+  assert.match(PART_B, /\.dshmn-item\{[^}]*padding:16px 0/, '行用 16px 上下内边距（宿主网格）');
   assert.match(PART_B, /\.dshmn-verdict \+ \.dshmn-card\{margin-top:16px\}/, '判决条与第一张卡片之间要有间距');
   assert.match(PART_B, /\.dshmn-card \+ \.dshmn-card\{margin-top:12px\}/, '卡片之间 gap 12');
   // 圆角只用宿主那几档；10 / 13 这种字面量一律不许再写。
   const radii = [...PART_B.matchAll(/border-radius:\s*([\d.]+)px/g)].map((m) => Number(m[1]));
   assert.deepEqual(radii.filter((value) => ![4, 8, 12, 16, 20, 28].includes(value)), [], '圆角只许 4/8/12/16/20/28');
-  assert.equal(PART_B.includes('border-radius:50%'), true, '问号是圆点（50% 不算字面量档位）');
+  assert.equal(PART_B.includes('border-radius:50%'), false, '问号已删，全页不该再有圆形控件');
+});
+
+// 六处对齐宿主的细节：少一处就会在暗色主题或长文案下露出破绽，所以逐条钉住。
+test('CSS 审计：六处宿主规范对齐（说明 13/20、标签行高 20、card-fill、bg-layer-1、card-stroke、chips 13）', () => {
+  assert.match(PART_B, /\.dshmn-lead\{[^}]*font-size:13px;line-height:20px/, '页头说明 13/20');
+  assert.match(PART_B, /\.dshmn-label\{[^}]*line-height:20px/, '字段标签行高 20px（不是 1.5）');
+  assert.equal(PART_B.includes('line-height:1.5'), false, '全页不再用 1.5 这种行高');
+  assert.match(PART_B, /\.dshmn-card\{[^}]*background:var\(--dsw-alias-settings-card-fill\)/,
+    '卡片要补 card-fill 底（暗色下才不与页面同色）');
+  assert.match(PART_B, /\.dshmn-input,\.dshmn-select\{[^}]*background:var\(--dsw-alias-bg-layer-1\)/,
+    '输入框底色用 bg-layer-1');
+  assert.equal(PART_B.includes('--dsw-alias-bg-layer-3'), false, '输入框不再是 bg-layer-3');
+  assert.match(PART_B, /\.dshmn-segBtn\{[^}]*font-size:13px/, 'chips 字号 13');
+  assert.match(PART_B, /\.dshmn-verdictSummary\{[^}]*font-size:12px;line-height:18px/, '人话摘要是 12/18 小字');
+  assert.match(PART_B, /\.dshmn-verdictSummary\{[^}]*color:var\(--dsw-alias-label-tertiary\)/, '人话摘要用 tertiary 色');
 });
 
 test('CSS 审计：判决条是三态 hero，竖条与标题色都由 state token 决定', () => {

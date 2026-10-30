@@ -320,9 +320,32 @@ async function renderPage(options = {}) {
     findBy: (predicate) => findByProps(root, predicate),
     /** 按 props 找全部节点（数开关、数 chips）。 */
     findAllBy: (predicate) => findAllByProps(root, predicate),
-    /** 页面上现在有几个事件开关（开关的 props 是 checked + label + onChange）。 */
+    /**
+     * 页面上现在有几个**事件**开关（开关的 props 带 data-event）。
+     * 总开关（data-master）不算事件开关，它由 master() 单独取。
+     */
     switches: () => findAllByProps(root, (props) => typeof props.label === 'string'
-      && typeof props.onChange === 'function' && props.checked !== undefined),
+      && typeof props.onChange === 'function' && props.checked !== undefined
+      && props['data-event'] !== undefined),
+    /** 通知时机第一行的总开关。 */
+    master: () => findByProps(root, (props) => props['data-master'] === 'true'),
+    /**
+     * 页面上所有**可见文字**拼成的串（只走 children，不含 aria-label / title 等属性）。
+     * 用来断言"这句话在版面上出现几次"——宿主原语常把 label 也渲染成文字，
+     * 光数 JSON 会把属性里的同名词一起数进去，误判成重影。
+     */
+    text: () => {
+      const walk = (node) => {
+        if (node === null || node === undefined) return '';
+        if (typeof node === 'string') return node;
+        if (typeof node === 'number') return String(node);
+        if (Array.isArray(node)) return node.map(walk).join('');
+        if (typeof node !== 'object') return '';
+        // 元素树里 children 是节点自身的一层数组（与 findByProps 的取法一致）。
+        return walk(Array.isArray(node.children) ? node.children : null);
+      };
+      return walk(root);
+    },
     /** 再渲染两轮，让刚点出来的状态落地。 */
     settle: async () => {
       await new Promise((resolve) => { setTimeout(resolve, 10); });
@@ -360,7 +383,7 @@ test('渲染冒烟：不再有发送通道选择器，SMTP 字段照常出现', 
   assert.equal(json.includes('只记录'), false, '「只记录」通道必须从页面消失');
   assert.equal(json.includes('Resend'), false, 'Resend 通道必须从页面消失');
   assert.equal(json.includes('发送通道'), false, '通道选择器的分组标签必须消失');
-  assert.equal(json.includes('怎么发'), true, '分组标题保留');
+  assert.equal(json.includes('发信方式'), true, '分组标题保留（原「怎么发」已改名）');
   assert.equal(json.includes('SMTP 主机'), true, 'SMTP 字段仍要出现在页面上');
   assert.equal(json.includes('SMTP 授权码'), true);
 });
@@ -443,7 +466,7 @@ test('渲染冒烟：「可选设置 / 发件人与链接」整块已删，不�
     assert.equal(json.includes(ghost), false, `「${ghost}」属于已删除的「可选设置」`);
   }
   // 保留下来的三组与页脚照旧在页面上。
-  for (const kept of ['收件人', '怎么发', '什么时候发给我', 'SMTP 主机', 'SMTP 授权码', '恢复全部默认']) {
+  for (const kept of ['收件人', '发信方式', '通知时机', 'SMTP 主机', 'SMTP 授权码', '恢复全部默认']) {
     assert.equal(json.includes(kept), true, `「${kept}」必须保留`);
   }
   // 删掉的那一组是**手写的** <section class="dshmn-group">，剩下的三组都走 Card 组件
@@ -633,8 +656,7 @@ test('渲染冒烟：判决条只看已保存的配置——草稿填齐但没�
 // 可忽略但顺手的一条：端口输入里的非法字符不该进草稿（Number('46a') 是 NaN）。
 test('渲染冒烟：端口输入只收数字——非法字符不进草稿，也不搅乱脏计数', async () => {
   const page = await renderPage();
-  // 端口折进「更多」里，默认收起：先把它展开（这也顺带证明它默认确实不在）。
-  await page.click('更多');
+  // 端口与加密默认就在版面上（不再折进「更多」）。
   await page.edit('dshmn-smtp-port', '46a');
   assert.equal(page.json().includes('没有未保存的改动'), true, '非法输入不该记成一项改动');
   assert.equal(page.byId('dshmn-smtp-port').props.value, 465, '框里仍是上一次的合法值');
@@ -644,22 +666,74 @@ test('渲染冒烟：端口输入只收数字——非法字符不进草稿，�
 });
 
 
-// ── 本轮：视觉与信息架构简化（档位＝中等：重排层级 + 收紧密度）────────────────
-// 六件事各钉一条，免得"看起来做了、其实没做"：
-//   ① 8 个事件开关一个不少，且每个都切得动；
-//   ② 行说明平时不占版面，点问号才出现，再点回去（问号带 aria-label / aria-expanded，是原生 button）；
-//   ③ 保存组在页头，判决条里不再有保存按钮；
-//   ④ 全页「发送测试邮件」只出现一次；
-//   ⑤ 「更多」默认收起、展开后端口与加密都能改，收起时标题带当前值；
-//   ⑥ 7 个服务商全在（6 个预设 + 其他）。
-test('渲染冒烟：8 个事件开关全在，且每个都切得动', async () => {
+// ── 本轮：ui18 零折叠骨架（信息架构 + 交互重排）────────────────────────────
+// 这一组每一条都是"看起来做了、其实没做"的重灾区，所以全部断言渲染出来的树：
+//   ① 全页零折叠：没有折叠控件、没有「更多」、没有「还有 3 种情况」、没有问号按钮；
+//   ② 端口与加密默认可见（不再折进「更多」）；
+//   ③ 8 条事件说明默认可见，且每条都压到 ≤16 个中文字；
+//   ④ 总开关在通知时机第一行，关掉后判决条改口、8 个事件开关变灰禁用但不隐藏；
+//   ⑤ 8 个事件全关时判决条说「通知已全部关闭」，不再说「可以发信了」；
+//   ⑥ 授权码有未保存草稿时，状态诚实地显示「有未保存的授权码」；
+//   ⑦ 判决条的人话摘要随配置变化（服务商 · 主机 → 收件人 · 事件）；
+//   ⑧ 吸底条常驻：脏时按钮可用、干净时禁用，且不承担脏读数；
+//   ⑨ 保存读数按量级退化（320 秒 → 5 分钟前）。
+test('渲染冒烟：全页零折叠——没有任何折叠控件，也没有折叠标题', async () => {
   const page = await renderPage();
-  assert.equal(page.switches().length, 5, '常显的 5 个开关先要在');
-  assert.equal(page.json().includes('还有 3 种情况'), true, '「还有 3 种情况」的折叠入口要留着');
-  await page.click('还有 3 种情况');
-  assert.equal(page.switches().length, 8, '展开之后 8 个开关一个都不许少');
-  const labels = ['任务完成', '任务出错', '卡住，需要你介入', '等你审批', '也通知子代理会话',
-    '你主动停止', '系统中断', '达到长度上限'];
+  assert.equal(page.findBy((props) => props['aria-expanded'] !== undefined), null,
+    '折叠控件（aria-expanded）必须整块消失');
+  const json = page.json();
+  for (const ghost of ['▸', '▾', '更多', '还有 3 种情况', 'dshmn-fold', '展开「']) {
+    assert.equal(json.includes(ghost), false, '「' + ghost + '」属于已删除的折叠/问号交互');
+  }
+  // 折叠没了不等于内容没了：原来藏在折叠里的东西必须原地可见。
+  assert.ok(page.byId('dshmn-smtp-port') !== null, '端口输入在版面上');
+  assert.equal(page.switches().length, 8, '8 个事件开关全在版面上');
+});
+
+test('渲染冒烟：端口与加密默认可见，且都能改（不再折进「更多」）', async () => {
+  const page = await renderPage();
+  assert.ok(page.byId('dshmn-smtp-port') !== null, '端口输入默认就要在');
+  assert.ok(page.byId('dshmn-smtp-secure') !== null, '加密下拉默认就要在');
+  assert.equal(page.byId('dshmn-smtp-port').props.value, 465, '端口默认取已保存值');
+  assert.equal(page.byId('dshmn-smtp-secure').props.value, 'tls', '加密默认取已保存值');
+  await page.edit('dshmn-smtp-port', '587');
+  assert.equal(page.byId('dshmn-smtp-port').props.value, 587, '端口改得动');
+  await page.edit('dshmn-smtp-secure', 'starttls');
+  assert.equal(page.byId('dshmn-smtp-secure').props.value, 'starttls', '加密改得动');
+  assert.equal(page.json().includes('有 2 项改动未保存'), true, '端口 + 加密各算一项改动');
+  // 四列网格：主机 / 端口 / 加密 / 用户名在同一个栅格里
+  assert.ok(page.findBy((props) => props.className === 'dshmn-smtpGrid') !== null, '四个字段在同一个四列栅格里');
+});
+
+test('渲染冒烟：8 条事件说明默认可见，且每条 ≤16 个中文字', async () => {
+  const page = await renderPage();
+  const notes = page.findAllBy((props) => props.className === 'dshmn-eventNote')
+    .map((node) => node.children[0])
+    .sort();
+  const expected = ['正常跑完时', '报错终止时', '等你补充信息时', '等你点审批时',
+    '子代理也通知', '你按了停止', '系统中断时', '达到上限时'].sort();
+  assert.deepEqual(notes, expected, '8 条说明必须常显在格子下方，一条不少');
+  for (const note of expected) {
+    assert.equal([...note].length <= 16, true, note + ' 超过 16 个中文字');
+    assert.equal(page.json().includes(note), true, '渲染结果里要能看见「' + note + '」');
+  }
+});
+
+test('渲染冒烟：8 个事件开关全在（三列网格、不分组），且每个都切得动', async () => {
+  const page = await renderPage();
+  assert.equal(page.switches().length, 8, '8 个开关一个不少（总开关不算事件开关）');
+  assert.equal(page.json().includes('其他情况'), false, '不设「其他情况」小标题');
+  assert.ok(page.findBy((props) => props.className === 'dshmn-events') !== null, '8 个格子落在同一个网格容器里');
+  const labels = ['任务完成', '任务出错', '卡住', '等你审批', '也通知子代理',
+    '你主动停止', '系统中断', '长度上限'];
+  // 标题在**可见文字**里只许出现一次：宿主 Checkbox 会把 label 当可见文字渲染，
+  // 之前因此出现过「☑ 任务完成 任务完成」的重影。
+  // 注意不能用 JSON 计数——aria-label 里也带着同一个词，但那不是可见文字。
+  const text = page.text();
+  for (const label of labels) {
+    assert.equal(text.split(label).length - 1 >= 1, true, '「' + label + '」必须出现在版面上');
+  }
+  assert.equal(text.split('任务完成').length - 1, 1, '「任务完成」在可见文字里只能出现一次（勾选框不许再渲染标题）');
   for (const label of labels) {
     const before = page.switches().find((item) => item.props.label === label);
     assert.ok(before !== undefined, '缺少「' + label + '」这一行');
@@ -670,29 +744,119 @@ test('渲染冒烟：8 个事件开关全在，且每个都切得动', async () 
     assert.equal(after.props.checked, next, '「' + label + '」切不动');
   }
   assert.equal(page.json().includes('有 8 项改动未保存'), true, '8 个开关各算一项改动');
+  assert.equal(page.json().includes('7 项开启'), true, '卡片头读数跟着变（completed 本来开着，切完是 7 项开启）');
 });
 
-test('渲染冒烟：说明平时不占版面，点问号出现、再点消失（aria + 键盘）', async () => {
+test('渲染冒烟：总开关在通知时机第一行——关掉后判决条改口，8 个事件开关变灰禁用', async () => {
   const page = await renderPage();
-  assert.equal(page.json().includes('会话正常干完一件活。'), false, '行说明默认不该常显');
-  const pick = () => page.findBy((props) => typeof props['aria-label'] === 'string'
-    && props['aria-label'].includes('任务完成') && props['aria-expanded'] !== undefined);
-  const closed = pick();
-  assert.ok(closed !== null, '每行标题旁要有一个问号按钮');
-  assert.equal(closed.type, 'button', '问号必须是原生 button，键盘才操作得了');
-  assert.equal(closed.props['aria-expanded'], 'false', '收起时 aria-expanded 要是 false');
-  assert.equal(closed.props['aria-label'], '展开「任务完成」的说明', '可访问名要说清点它会干什么');
-  assert.equal(closed.props['aria-controls'], 'dshmn-note-notifyCompleted', '要有 aria-controls 指向那段说明');
-  closed.props.onClick();
+  try {
+    const master = page.master();
+    assert.ok(master !== null, '通知时机第一行要有总开关');
+    assert.equal(master.props.checked, true, '默认按已保存值开着');
+    assert.equal(page.json().includes('关闭后不再发送任何邮件'), true, '总开关要带一句说明');
+
+    master.props.onChange(false);
+    await page.settle();
+    const events = page.switches();
+    assert.equal(events.length, 8, '关掉总开关后事件开关不许被隐藏');
+    for (const item of events) {
+      assert.equal(item.props.disabled, true, '「' + item.props.label + '」应变灰禁用');
+    }
+    // 判决条只认已保存值：先保存，才轮到它改口。
+    await page.click('保存');
+    const json = page.json();
+    assert.equal(json.includes('已关闭，不会发任何通知'), true, '总开关关掉并保存后，判决条要直说已关闭');
+    assert.equal(json.includes('可以发信了'), false);
+  } finally {
+    page.stop();
+  }
+});
+
+test('渲染冒烟：8 个事件全关时判决条说「通知已全部关闭」，不再说「可以发信了」', async () => {
+  const page = await renderPage({
+    credentialsConfigured: true,
+    settings: { ...SETTINGS_VALUE, notifyCompleted: false },
+  });
+  const json = page.json();
+  assert.equal(json.includes('通知已全部关闭'), true, '事件全关要单列一档判决');
+  assert.equal(json.includes('至少打开一个事件才会收到邮件'), true, '要给出下一步：至少开一个');
+  assert.equal(json.includes('可以发信了'), false, '事件全关时不许说可以发信');
+  assert.equal(json.includes('全部关闭'), true, '通知时机卡片头的读数说「全部关闭」');
+});
+
+test('渲染冒烟：授权码有未保存草稿时，状态诚实显示「有未保存的授权码」', async () => {
+  const page = await renderPage({ credentialsConfigured: true });
+  const stateOf = () => JSON.stringify(page.findBy((props) => props.className === 'dshmn-credState'));
+  assert.equal(stateOf().includes('已保存'), true, '存好了就先显示已保存');
+  assert.equal(stateOf().includes('有未保存的授权码'), false);
+
+  // 点一下只读框 = 「更换」：输入框展开，然后往里打字。
+  page.findBy((props) => props.id === 'dshmn-cred-smtp').props.onFocus();
   await page.settle();
-  assert.equal(page.json().includes('会话正常干完一件活。'), true, '点开之后说明要出现');
-  const opened = pick();
-  assert.equal(opened.props['aria-expanded'], 'true', '展开后 aria-expanded 要是 true');
-  assert.equal(opened.props['aria-label'], '收起「任务完成」的说明', '同一个按钮要能再收起来');
-  opened.props.onClick();
-  await page.settle();
-  assert.equal(page.json().includes('会话正常干完一件活。'), false, '再点一下说明要收回去');
-  assert.equal(pick().props['aria-expanded'], 'false');
+  await page.edit('dshmn-cred-smtp', 'abcd1234');
+
+  const dirty = stateOf();
+  assert.equal(dirty.includes('有未保存的授权码'), true, '有草稿就必须说清它还没保存');
+  assert.equal(dirty.includes('已保存'), false, '有草稿时不许再自称「✓ 已保存」');
+});
+
+test('渲染冒烟：判决条的人话摘要随配置变化（服务商 · 主机 → 收件人 · 事件）', async () => {
+  const summaryOf = (page) => page.findBy((props) => props.className === 'dshmn-verdictSummary').children[0];
+  const qq = await renderPage();
+  const net163 = await renderPage({
+    settings: {
+      ...SETTINGS_VALUE,
+      smtpHost: 'smtp.163.com',
+      recipients: 'a@163.com, b@163.com',
+      notifyCompleted: false,
+      notifyError: true,
+      notifyApproval: true,
+    },
+  });
+  assert.equal(summaryOf(qq), 'QQ 邮箱 · smtp.qq.com → me@qq.com · 跑完时通知',
+    '摘要要认得预设名、主机、首个收件人与已开启的事件');
+  assert.equal(summaryOf(net163), '163 邮箱 · smtp.163.com → 2 位收件人 · 出错、等审批时通知',
+    '多收件人报个数，最多列两个事件名');
+  assert.notEqual(summaryOf(qq), summaryOf(net163), '配置变了摘要必须跟着变');
+});
+
+test('渲染冒烟：吸底条常驻，脏时按钮可用、干净时两个都禁用，且不放脏读数', async () => {
+  const page = await renderPage();
+  const bar = () => page.findBy((props) => props.className === 'dshmn-savebar');
+  assert.ok(bar() !== null, '吸底条要在版面上');
+  assert.equal(findClickable(bar(), '保存').props.disabled, true, '干净态：吸底主按钮禁用');
+  assert.equal(findClickable(bar(), '放弃改动').props.disabled, true, '干净态：吸底次按钮禁用');
+  assert.equal(JSON.stringify(bar()).includes('没有未保存的改动'), false, '脏读数只放页头，不放吸底条');
+  await page.edit('dshmn-recipients', 'you@example.com');
+  assert.equal(findClickable(bar(), '保存').props.disabled, false, '有改动时吸底主按钮点得动');
+  assert.equal(findClickable(bar(), '放弃改动').props.disabled, false, '有改动时吸底次按钮也点得动');
+  await page.click('放弃改动');
+  assert.equal(findClickable(bar(), '保存').props.disabled, true, '放弃之后又回到禁用');
+});
+
+test('渲染冒烟：保存读数按量级退化——320 秒说「5 分钟前」', async () => {
+  const realNow = Date.now;
+  const t0 = 1_700_000_000_000;
+  Date.now = () => t0;
+  const page = await renderPage({ credentialsConfigured: true });
+  try {
+    await page.edit('dshmn-recipients', 'you@example.com');
+    await page.click('保存');
+    assert.equal(page.json().includes('已保存 · 刚刚'), true, '刚存完就是刚刚');
+    Date.now = () => t0 + 320_000;
+    await page.settle();
+    assert.equal(page.json().includes('已保存 · 5 分钟前'), true, '320 秒要说 5 分钟前');
+    assert.equal(page.json().includes('秒前'), false, '不该让人去数 320 秒');
+    Date.now = () => t0 + (60 * 60 * 1000) * 3;
+    await page.settle();
+    assert.equal(page.json().includes('已保存 · 3 小时前'), true, '超过一小时就按小时报');
+    Date.now = () => t0 + (24 * 60 * 60 * 1000) * 2;
+    await page.settle();
+    assert.equal(page.json().includes('已保存 · 2 天前'), true, '超过一天就按天报');
+  } finally {
+    Date.now = realNow;
+    page.stop();
+  }
 });
 
 test('渲染冒烟：保存组在页头右上，判决条里不再有保存按钮', async () => {
@@ -716,22 +880,6 @@ test('渲染冒烟：「发送测试邮件」两处并存——判决条主按�
   const json = drafting.json();
   assert.equal((json.match(/发送测试邮件/g) ?? []).length, 2, '没配好时同样是两处，入口不挑状态');
   assert.equal((json.match(/重新测试/g) ?? []).length, 0, '没点过就不该出现「重新测试」');
-});
-
-test('渲染冒烟：「更多」默认收起，展开后端口与加密都能改', async () => {
-  const page = await renderPage();
-  assert.equal(page.byId('dshmn-smtp-port'), null, '默认收起时不该渲染端口输入');
-  assert.equal(page.byId('dshmn-smtp-secure'), null, '默认收起时不该渲染加密下拉');
-  assert.equal(page.json().includes('更多（465 · tls）'), true, '收起时标题要写出当前值（偏离默认才写）');
-  await page.click('更多');
-  assert.ok(page.byId('dshmn-smtp-port') !== null, '展开后端口输入要在');
-  assert.ok(page.byId('dshmn-smtp-secure') !== null, '展开后加密下拉要在');
-  await page.edit('dshmn-smtp-port', '587');
-  assert.equal(page.byId('dshmn-smtp-port').props.value, 587, '端口改得动');
-  await page.edit('dshmn-smtp-secure', 'starttls');
-  assert.equal(page.byId('dshmn-smtp-secure').props.value, 'starttls', '加密改得动');
-  assert.equal(page.json().includes('更多（587 · starttls）'), true, '改动之后标题跟着更新');
-  assert.equal(page.json().includes('有 2 项改动未保存'), true, '端口 + 加密各算一项改动');
 });
 
 test('渲染冒烟：7 个邮箱服务商全在（6 个预设 + 其他），一行 chips', async () => {

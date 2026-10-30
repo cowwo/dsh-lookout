@@ -7,13 +7,15 @@
 //   2. 能发出去吗 → 顶部状态条 + 发送测试邮件（点了当场回执成败与原始报错）
 // 其余一切让路：不额外套卡片、不加编号、不做中英同屏。
 //
-// 信息架构（本轮只重做视觉骨架，信息架构与功能不动）：
-//   内容列 max-width 760 居中；页标题 18/600 + 说明 12/18；右上只有动作组
-//   （脏读数 + 保存 + 放弃改动），它是动作区、不是第二层页头；
-//   判决条 = 状态色 hero（bg-module-platform + 左侧 3px 状态色 + 18/600 标题 + 主按钮在右下）；
-//   下面三张描边卡片：收件人 / 怎么发 / 什么时候发给我（14/22·500 卡片标题 + 12/18 状态读数）；
-//   7 个预设收成一行横向滚动 chips；端口 / 加密折进「更多」（收起时标题带当前值）；
-//   8 个事件开关排成宿主同款行（16px 上下内边距 + 行自身 .5px 线），说明由问号**点击**展开。
+// 信息架构（ui18 = 零折叠骨架）：
+//   内容列 max-width 760 居中；页头**吸顶**（标题 18/26·600 + 说明 13/20 + 右侧脏读数/保存/放弃改动）；
+//   判决条 = 状态色 hero（bg-module-platform + 左侧 3px 状态色 + 18/26·600 标题 + 14/22 结论句
+//     + 12/18 人话摘要 + 主按钮在右下）；
+//   下面三张卡片：收件人 / 发信方式 / 通知时机（14/22·500 卡片标题 + 12/18 状态读数）；
+//   **全页零折叠**：没有「▸ 更多」、没有「还有 3 种情况」、没有问号按钮——
+//     端口 / 加密 / 主机 / 用户名宽屏一行四列（≤560px 两行两列）；
+//     8 个事件开关三列网格（窄屏一列、不分组），说明常显在格子下方（一行 12/18）；
+//     通知时机第一行是总开关（关闭后 8 个事件开关变灰禁用但不隐藏）；吸底条常驻「放弃 + 保存」。
 //   字号阶梯全部落在宿主网格上（只用整像素档，不再有半档字号）；圆角只用 4/8/12/16/20/28。
 //
 // 编辑模型：**显式保存**。所有控件只改本地草稿，点「保存」才一次性写回：
@@ -72,6 +74,7 @@ window.__ModuleLoader__.load({
       'test.failed': '这次没发出去',
       'cred.saved': '已保存',
       'cred.notSaved': '还没保存',
+      'cred.draft': '有未保存的授权码',
       'cred.replace': '更换',
       'cred.clear': '清除',
       'cred.placeholder': '粘贴授权码',
@@ -92,6 +95,9 @@ window.__ModuleLoader__.load({
       'save.saving': '保存中…',
       'save.savedJust': '已保存 · 刚刚',
       'save.savedAgo': '已保存 · {n} 秒前',
+      'save.savedMin': '已保存 · {n} 分钟前',
+      'save.savedHour': '已保存 · {n} 小时前',
+      'save.savedDay': '已保存 · {n} 天前',
       'save.error': '保存失败：{error}',
       'save.retry': '重试',
       'save.reload': '重新读取',
@@ -108,7 +114,9 @@ window.__ModuleLoader__.load({
       'save.checkingCred': '正在确认授权码是否已写入…',
       'save.credCheckFailed': '凭据状态读取失败：{error}',
 
+      // 判决条只按已保存的配置判定，四档会给四句不同的话（总开关关 > 事件全关 > 缺配置 > 可以发）。
       'status.disabled': '已关闭，不会发任何通知',
+      'status.allOff': '通知已全部关闭',
       'status.needRecipients': '还差一个收件人',
       'status.needHost': '还差 SMTP 服务器地址',
       'status.needUser': '还差 SMTP 用户名',
@@ -118,6 +126,7 @@ window.__ModuleLoader__.load({
 
       // 判决下面那句人话。只说用户的事，不说实现的事。
       'status.why.disabled': '打开下面任意一种情况，才会开始通知你。',
+      'status.why.allOff': '至少打开一个事件才会收到邮件。',
       'status.why.needRecipients': '没有收件邮箱，邮件没有地方可去。',
       'status.why.needHost': '还没填服务器地址。',
       'status.why.needUser': '多数邮箱要求用户名和授权码成对出现。',
@@ -139,8 +148,8 @@ window.__ModuleLoader__.load({
       'act.saveHint': '把这一页的改动一次性写回配置。',
 
       'group.recipients': '收件人',
-      'group.transport': '怎么发',
-      'group.outcomes': '什么时候发给我',
+      'group.transport': '发信方式',
+      'group.outcomes': '通知时机',
 
       'recipients.label': '收件邮箱',
       'recipients.placeholder': 'you@qq.com',
@@ -157,12 +166,10 @@ window.__ModuleLoader__.load({
       'preset.label': '邮箱服务商',
       'preset.other': '其他',
       'preset.detected': '已按「{name}」填好',
-      // 端口 / 加密收进「更多」：收起来不等于藏起来——偏离宿主默认就把现值摆到标题上。
-      'transport.more': '更多',
-      'transport.moreWith': '更多（{value}）',
-      // 事件开关的问号按钮：只做可访问名（说明正文仍走 outcomes.*Hint）。
-      'hint.show': '展开「{title}」的说明',
-      'hint.hide': '收起「{title}」的说明',
+
+      // 通知时机第一行：总开关。关掉之后 8 个事件开关变灰禁用（但不隐藏）。
+      'notify.master': '邮件通知',
+      'notify.masterHint': '关闭后不再发送任何邮件',
 
       'smtp.host': 'SMTP 主机',
       'smtp.port': '端口',
@@ -176,27 +183,45 @@ window.__ModuleLoader__.load({
       'cred.smtpHelpTitle': '怎么拿 SMTP 授权码',
       'cred.smtpHelpBody': '授权码不是登录密码，是邮箱服务商单独发的口令（QQ 是 16 位）。\n\nQQ 邮箱：设置 → 账户 → 开启「POP3/SMTP 服务」→ 生成授权码。\n163 / 126：设置 → POP3/SMTP/IMAP → 开启服务 → 新增授权码。\nGmail：账号 → 安全性 → 两步验证 → 应用专用密码。\niCloud：Apple ID → 登录与安全 → App 专用密码。\nOutlook：账户 → 安全性 → 高级安全选项 → 应用密码。',
       'cred.helpClose': '知道了',
-      'cred.clear': '清除',
 
+      // 8 个事件：标题是名词短语，说明压到一行（≤16 个中文字），常显在格子下方。
       'outcomes.completed': '任务完成',
-      'outcomes.completedHint': '会话正常干完一件活。',
+      'outcomes.completedHint': '正常跑完时',
       'outcomes.error': '任务出错',
-      'outcomes.errorHint': '会话报错终止。',
-      'outcomes.blocked': '卡住，需要你介入',
-      'outcomes.blockedHint': 'agent 需要你补充信息才能继续。',
+      'outcomes.errorHint': '报错终止时',
+      'outcomes.blocked': '卡住',
+      'outcomes.blockedHint': '等你补充信息时',
       'outcomes.approval': '等你审批',
-      'outcomes.approvalHint': '立即发送，不参与合并窗口。',
-      'outcomes.more': '还有 3 种情况（默认关）',
-      'outcomes.countOn': '{n} 项开启',
-      'outcomes.countOff': '全部关闭，不会通知你',
+      'outcomes.approvalHint': '等你点审批时',
+      'outcomes.subagents': '也通知子代理',
+      'outcomes.subagentsHint': '子代理也通知',
       'outcomes.aborted': '你主动停止',
-      'outcomes.abortedHint': '只包含你自己按停止的那次。',
+      'outcomes.abortedHint': '你按了停止',
       'outcomes.interrupted': '系统中断',
-      'outcomes.interruptedHint': 'DSH 重启 / 热更新 / 被父级取消。',
-      'outcomes.maxTokens': '达到长度上限',
-      'outcomes.maxTokensHint': '回复被长度上限截断。',
-      'outcomes.subagents': '也通知子代理会话',
-      'outcomes.subagentsHint': '一个 workflow 能扇出几十个子会话，默认不打扰。',
+      'outcomes.interruptedHint': '系统中断时',
+      'outcomes.maxTokens': '长度上限',
+      'outcomes.maxTokensHint': '达到上限时',
+      'outcomes.countOn': '{n} 项开启',
+      'outcomes.countOff': '全部关闭',
+
+      // 判决条第三行的「人话摘要」用短名，一句话最多列两个事件。
+      'short.completed': '跑完',
+      'short.error': '出错',
+      'short.blocked': '卡住',
+      'short.approval': '等审批',
+      'short.subagents': '子代理',
+      'short.aborted': '停止',
+      'short.interrupted': '中断',
+      'short.maxTokens': '长度上限',
+
+      'summary.line': '{provider} · {host} → {to} · {events}',
+      'summary.noHost': '还没填主机',
+      'summary.noRecipient': '还没填收件人',
+      'summary.recipients': '{n} 位收件人',
+      'summary.custom': '自定义',
+      'summary.events': '{list}时通知',
+      'summary.eventsMore': '{list} 等 {n} 项时通知',
+      'summary.eventsOff': '通知已关闭',
 
       'danger.reset': '恢复全部默认',
       'danger.title': '恢复全部默认？',
@@ -213,6 +238,7 @@ window.__ModuleLoader__.load({
       'test.failed': 'This send did not go out',
       'cred.saved': 'Saved',
       'cred.notSaved': 'Not saved yet',
+      'cred.draft': 'An unsaved authorization code',
       'cred.replace': 'Replace',
       'cred.clear': 'Clear',
       'cred.placeholder': 'Paste the authorization code',
@@ -233,6 +259,9 @@ window.__ModuleLoader__.load({
       'save.saving': 'Saving…',
       'save.savedJust': 'Saved · just now',
       'save.savedAgo': 'Saved · {n}s ago',
+      'save.savedMin': 'Saved · {n} min ago',
+      'save.savedHour': 'Saved · {n} h ago',
+      'save.savedDay': 'Saved · {n} d ago',
       'save.error': 'Save failed: {error}',
       'save.retry': 'Retry',
       'save.reload': 'Reload',
@@ -247,6 +276,7 @@ window.__ModuleLoader__.load({
       'save.credCheckFailed': 'Could not read the credential state: {error}',
 
       'status.disabled': 'Off — no notifications will be sent',
+      'status.allOff': 'All notifications are off',
       'status.needRecipients': 'One recipient missing',
       'status.needHost': 'SMTP host missing',
       'status.needUser': 'SMTP user name missing',
@@ -255,6 +285,7 @@ window.__ModuleLoader__.load({
       'status.notServed': 'This page cannot read the plugin settings',
 
       'status.why.disabled': 'Turn on any case below and notifications start.',
+      'status.why.allOff': 'Turn on at least one event to get an email.',
       'status.why.needRecipients': 'Without a recipient address there is nowhere for the mail to go.',
       'status.why.needHost': 'No server address is set.',
       'status.why.needUser': 'Most providers want the user name and the authorization code together.',
@@ -274,8 +305,8 @@ window.__ModuleLoader__.load({
       'act.saveHint': 'Writes every change on this page back in one go.',
 
       'group.recipients': 'Recipients',
-      'group.transport': 'How to send',
-      'group.outcomes': 'When to notify me',
+      'group.transport': 'Sending method',
+      'group.outcomes': 'When to notify',
 
       'recipients.label': 'Recipient addresses',
       'recipients.placeholder': 'you@qq.com, one per line',
@@ -292,10 +323,9 @@ window.__ModuleLoader__.load({
       'preset.label': 'Mail provider',
       'preset.other': 'Other',
       'preset.detected': 'Filled in for “{name}”',
-      'transport.more': 'More',
-      'transport.moreWith': 'More ({value})',
-      'hint.show': 'Show the note for “{title}”',
-      'hint.hide': 'Hide the note for “{title}”',
+
+      'notify.master': 'Email notifications',
+      'notify.masterHint': 'When off, no email is sent at all',
 
       'smtp.host': 'SMTP host',
       'smtp.port': 'Port',
@@ -309,27 +339,43 @@ window.__ModuleLoader__.load({
       'cred.smtpHelpTitle': 'Getting an SMTP authorization code',
       'cred.smtpHelpBody': 'An authorization code is not your login password — the mail provider issues it separately.\n\nQQ Mail: Settings → Account → enable “POP3/SMTP service” → generate the code.\n163 / 126: Settings → POP3/SMTP/IMAP → enable the service → add an authorization code.\nGmail: Account → Security → 2-Step Verification → App passwords.\niCloud: Apple ID → Sign-In and Security → App-Specific Passwords.\nOutlook: Account → Security → Advanced security options → App password.',
       'cred.helpClose': 'Got it',
-      'cred.clear': 'Clear',
 
       'outcomes.completed': 'Task completed',
-      'outcomes.completedHint': 'A session finished its work normally.',
+      'outcomes.completedHint': 'Finished normally',
       'outcomes.error': 'Task failed',
-      'outcomes.errorHint': 'A session ended with an error.',
-      'outcomes.blocked': 'Stuck — needs you',
-      'outcomes.blockedHint': 'The agent needs more from you to continue.',
+      'outcomes.errorHint': 'Ended with an error',
+      'outcomes.blocked': 'Stuck',
+      'outcomes.blockedHint': 'Needs your input',
       'outcomes.approval': 'Waiting for your approval',
-      'outcomes.approvalHint': 'Sent immediately, outside the coalesce window.',
-      'outcomes.more': '3 more cases (off by default)',
-      'outcomes.countOn': '{n} on',
-      'outcomes.countOff': 'All off — you will not be notified',
+      'outcomes.approvalHint': 'Waits for your approval',
+      'outcomes.subagents': 'Subagents too',
+      'outcomes.subagentsHint': 'Subagents too',
       'outcomes.aborted': 'You stopped it',
-      'outcomes.abortedHint': 'Only when you pressed stop yourself.',
+      'outcomes.abortedHint': 'You pressed stop',
       'outcomes.interrupted': 'Interrupted by the system',
-      'outcomes.interruptedHint': 'Harness restart / hot reload / cancelled by a parent.',
-      'outcomes.maxTokens': 'Token limit reached',
-      'outcomes.maxTokensHint': 'The reply was cut off by the length limit.',
-      'outcomes.subagents': 'Also notify subagent sessions',
-      'outcomes.subagentsHint': 'One workflow can fan out dozens of sub-sessions; off by default.',
+      'outcomes.interruptedHint': 'System interrupt',
+      'outcomes.maxTokens': 'Length cap',
+      'outcomes.maxTokensHint': 'Hit the cap',
+      'outcomes.countOn': '{n} on',
+      'outcomes.countOff': 'All off',
+
+      'short.completed': 'done',
+      'short.error': 'error',
+      'short.blocked': 'stuck',
+      'short.approval': 'approval',
+      'short.subagents': 'subagents',
+      'short.aborted': 'stop',
+      'short.interrupted': 'interrupt',
+      'short.maxTokens': 'token cap',
+
+      'summary.line': '{provider} · {host} → {to} · {events}',
+      'summary.noHost': 'no host yet',
+      'summary.noRecipient': 'no recipient yet',
+      'summary.recipients': '{n} recipients',
+      'summary.custom': 'Custom',
+      'summary.events': 'notify on {list}',
+      'summary.eventsMore': 'notify on {list} and {n} in all',
+      'summary.eventsOff': 'notifications are off',
 
       'danger.reset': 'Reset everything to defaults',
       'danger.title': 'Reset everything to defaults?',
@@ -378,10 +424,21 @@ window.__ModuleLoader__.load({
     ];
 
     /**
-     * 端口 / 加密的宿主默认值（逐字对齐 lib/notify/config.js：端口 465、加密 auto）。
-     * 「更多」折叠标题靠它判断这一对值是不是偏离默认，偏离才在后面写当前值。
+     * 8 个事件开关，一份真源：字段名 / 标题键 / 说明键 / 摘要短名。
+     *
+     * 通知时机卡片、卡片头读数、判决条的「事件全关」判定、人话摘要都读这一份表——
+     * 各写一遍必然漂：加了第 9 个事件时会漏掉某处。顺序就是格子顺序。
      */
-    const DEFAULT_TRANSPORT = { port: 465, secure: 'auto' };
+    const OUTCOME_FIELDS = [
+      { field: 'notifyCompleted', title: 'outcomes.completed', hint: 'outcomes.completedHint', short: 'short.completed' },
+      { field: 'notifyError', title: 'outcomes.error', hint: 'outcomes.errorHint', short: 'short.error' },
+      { field: 'notifyBlocked', title: 'outcomes.blocked', hint: 'outcomes.blockedHint', short: 'short.blocked' },
+      { field: 'notifyApproval', title: 'outcomes.approval', hint: 'outcomes.approvalHint', short: 'short.approval' },
+      { field: 'includeSubagents', title: 'outcomes.subagents', hint: 'outcomes.subagentsHint', short: 'short.subagents' },
+      { field: 'notifyAbortedByUser', title: 'outcomes.aborted', hint: 'outcomes.abortedHint', short: 'short.aborted' },
+      { field: 'notifyInterrupted', title: 'outcomes.interrupted', hint: 'outcomes.interruptedHint', short: 'short.interrupted' },
+      { field: 'notifyMaxTokens', title: 'outcomes.maxTokens', hint: 'outcomes.maxTokensHint', short: 'short.maxTokens' },
+    ];
 
     /**
      * 解析收件人：一行一个（兼容逗号/分号），去空、去重、丢弃明显不含 @ 的项。
@@ -488,9 +545,10 @@ window.__ModuleLoader__.load({
       return hit === undefined ? '' : hit;
     }
 
-    /** 状态条的取值只由「配置齐不齐」决定；投递历史已随账本一起删除。 */
+    /** 状态条的取值只由「配置齐不齐」与「有没有事件要通知」决定；投递历史已随账本一起删除。 */
     const STATUS_TONE = {
       disabled: 'idle',
+      allOff: 'warning',
       needRecipients: 'warning',
       needHost: 'warning',
       needUser: 'warning',
@@ -500,15 +558,18 @@ window.__ModuleLoader__.load({
 
     /**
      * 推导状态条要显示哪个结论。纯函数，输入全部来自草稿与凭据状态。
-     * SMTP 是唯一的发送方式，必填项是「主机 + 用户名 + 凭据」，缺哪个就报哪个——
-     * 只报主机会让用户填完主机才发现还是发不出去。
+     *
+     * 优先级（上一档压住下一档，顺序就是这个人写下来的顺序）：
+     *   总开关关闭 > 8 个事件全关 > 缺配置（收件人 / 主机 / 用户名 / 凭据）> 可以发信。
+     * 总开关关着时谈"缺什么"没有意义；事件全关时谈「可以发信了」是骗人——信不会发出去。
      * 投递历史不参与：账本已删，这里只回答「配置齐不齐」。
-     * @param {object} input 判定输入
+     * @param {object} input 判定输入（不传 eventsOn 时跳过「事件全关」这一档）
      * @returns {string} 状态键
      */
     function deriveStatus(input) {
-      const { enabled, recipientCount, host, user, credentialConfigured } = input ?? {};
+      const { enabled, eventsOn, recipientCount, host, user, credentialConfigured } = input ?? {};
       if (enabled !== true) return 'disabled';
+      if (eventsOn === 0) return 'allOff';
       if (!(recipientCount > 0)) return 'needRecipients';
       if (String(host ?? '').trim() === '') return 'needHost';
       if (String(user ?? '').trim() === '') return 'needUser';
@@ -548,6 +609,24 @@ window.__ModuleLoader__.load({
       return done === true ? 'done' : 'warning';
     }
 
+
+    /**
+     * 保存读数的"多久之前"。按量级退化，别让人去数 320 秒：
+     *   <60 秒 → 刚刚 / N 秒前；<60 分 → N 分钟前；<24 时 → N 小时前；否则 N 天前。
+     * @param {number} ms 距保存成功的毫秒数
+     * @param {Function} t 文案函数
+     * @returns {string} 读数
+     */
+    function agoText(ms, t) {
+      const seconds = Math.max(0, Math.floor(ms / 1000));
+      if (seconds < 60) return seconds === 0 ? t('save.savedJust') : t('save.savedAgo', { n: seconds });
+      const minutes = Math.floor(seconds / 60);
+      if (minutes < 60) return t('save.savedMin', { n: minutes });
+      const hours = Math.floor(minutes / 60);
+      if (hours < 24) return t('save.savedHour', { n: hours });
+      return t('save.savedDay', { n: Math.floor(hours / 24) });
+    }
+
     // ---------------------------------------------------------------------------
     // 样式
     //
@@ -566,43 +645,45 @@ window.__ModuleLoader__.load({
     //
     // 量度（全部照抄宿主自己的设置页，别自己发明）：
     //   内容列 max-width 760 居中 · 页标题 18/26·600 · 卡片标题 14/22·500 · 行标题 14/22·400
-    //   字段标签 13/1.5·500（primary） · 说明 12/18 tertiary · 小读数 11/16
-    //   卡片 = .5px border-l4 + radius 20 + padding 14 16 + gap 12；卡片之间 gap 12
+    //   字段标签 13/20·500（primary） · 说明 12/18 tertiary · 小读数 11/16
+    //   卡片 = .5px settings-card-stroke + settings-card-fill + radius 20 + padding 14 16 + gap 12
     //   行 = padding 16px 0 + 行自身 .5px border-l2（最后一行没有）；段头 / 页脚一律不画线
-    //   填充面 = bg-module-platform（宿主"编辑器/选中态"用的就是这个）
+    //   填充面 = bg-module-platform（宿主"编辑器/选中态"用的就是这个；卡片另用 settings-card-fill）
     //
-    // 纪律：全页零硬编码颜色（单测里有审计）。**全页只有一个填充面 —— 判决条。**
+    // 纪律：全页零硬编码颜色（单测里有审计）。**状态色填充面只有判决条一处**；
+    // 卡片的 fill / stroke 用宿主 settings 自己的 token（暗色下才不与页面同色）。
     // ---------------------------------------------------------------------------
 
     /** 一眼看出浏览器加载的是哪一版。放在根节点的 data-build 上，检查 DOM 可见，不占视觉。 */
-    const BUILD = 'ui17';
+    const BUILD = 'ui18';
 
-    const CSS = `/* dsh-notify-p · 设置页样式（视觉骨架照抄宿主 settings 页；全页零硬编码颜色）
-   字号阶梯（每一档都落在宿主网格上，全页只用整像素档，不许半档）：
-     页标题 18/26·600 ＝ 判决标题 18/26·600 > 卡片标题 14/22·500
-     > 字段标签 13/1.5·500 > 行标题 14/22·400 > 说明 12/18 > 小读数 11/16
-   骨架：内容列 max-width 760 居中；页头只有标题 + 动作组；三张描边卡片；
-   判决条是唯一填充面（bg-module-platform）+ 左侧 3px 状态色；页脚无边框。
-   线只长在行自己身上（.5px border-l2，最后一行没有），段头与页脚一律不画线。
-   圆角只用宿主那几档：卡片 / 判决条 20、输入框 12、chips 8、问号 50%。 */
+    const CSS = `/* dsh-notify-p · 设置页样式（ui18 零折叠骨架；全页零硬编码颜色）
+字号阶梯（每一档都落在宿主网格上，全页只用整像素档，不许半档）：
+  页标题 18/26·600 ＝ 判决标题 18/26·600 > 卡片标题 14/22·500 > 行标题 14/22·400
+  > 页头说明 13/20 ＝ 字段标签 13/20·500 ＝ chips 13/18 > 说明 12/18 > 小读数 11/16
+骨架：内容列 max-width 760 居中；页头吸顶、吸底保存条常驻；三张卡片（card-fill 底 + card-stroke 描边）；
+判决条是唯一的状态色填充面（bg-module-platform）+ 左侧 3px 状态色；页脚无边框。
+线只长在行自己身上（.5px border-l2，最后一行没有），段头与页脚一律不画线。
+**零折叠**：没有「▸ 更多」、没有「还有 3 种情况」、没有问号按钮——这一页所有内容默认都在。
+圆角只用宿主那几档：卡片 / 判决条 20、输入框 12、chips 8。 */
 .dshmn-page{display:flex;flex-direction:column;width:100%;max-width:760px;margin:0 auto;min-width:0;color:var(--dsw-alias-label-primary);font-size:14px;line-height:22px}
 .dshmn-mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;line-height:16px;font-variant-numeric:tabular-nums}
 
-/* 页头：标题 18/600 独占一行，右上只有动作组（脏读数 + 保存 + 放弃改动）。
-   不画线、不放说明、不占第二层高度——它是内容区第一行，不是第二条标题栏。 */
-.dshmn-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px 16px;margin:0 0 24px;min-width:0;flex-wrap:wrap}
-.dshmn-headText{display:flex;flex-direction:column;gap:12px;min-width:0;flex:1 1 auto}
+/* ── 页头：吸顶常驻（自己带背景与内边距，滚过去不会盖住内容）───────────────
+   内容 = 标题 + 一行说明 + 右侧动作组（脏读数 + 保存 + 放弃改动）。 */
+.dshmn-head{position:sticky;top:0;z-index:2;display:flex;align-items:flex-start;justify-content:space-between;gap:12px 16px;margin:0 0 16px;padding:12px 0;min-width:0;flex-wrap:wrap;background:var(--dsw-alias-bg-layer-2)}
+.dshmn-headText{display:flex;flex-direction:column;gap:8px;min-width:0;flex:1 1 auto}
 .dshmn-title{margin:0;min-width:0;color:var(--dsw-alias-label-primary);font-size:18px;line-height:26px;font-weight:600}
-.dshmn-lead{margin:0;min-width:0;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px}
+.dshmn-lead{margin:0;min-width:0;color:var(--dsw-alias-label-tertiary);font-size:13px;line-height:20px}
 .dshmn-headActions{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex:none;flex-wrap:wrap;min-width:0}
 .dshmn-stamp{flex:none;display:inline-flex;align-items:center;gap:6px;color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:16px;font-variant-numeric:tabular-nums}
 .dshmn-stamp[data-tone=busy]{color:var(--dsw-alias-label-secondary)}
 .dshmn-stamp[data-tone=error]{color:var(--dsw-alias-state-error-primary)}
 .dshmn-stamp[data-tone=dirty]{color:var(--dsw-alias-label-primary)}
 
-/* ── 判决条：全页唯一的填充面，也是唯一的状态色 hero ─────────────────────
+/* ── 判决条：全页唯一的状态色填充面，也是唯一的状态色 hero ─────────────────
    左侧 3px 竖条与标题色都由 data-tone 决定，颜色全部来自 state token（不硬编码）。
-   三态：可发信 = success / 需补配置 = warn / 已关闭 = label-tertiary。 */
+   四档 tone：done（可发信）/ warning（缺配置、事件全关）/ idle（总开关关闭）/ error。 */
 /* 按钮：按宿主线上规则（.primary/.outline + .sm）自绘 —— 见 Button() 注释里为什么不能等宿主原语 */
 .dshmn-btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;box-sizing:border-box;
   height:28px;padding:0 10px;border:none;border-radius:8px;font-family:inherit;
@@ -627,16 +708,18 @@ window.__ModuleLoader__.load({
 .dshmn-verdict[data-tone=idle] .dshmn-verdictTitle{color:var(--dsw-alias-label-tertiary)}
 .dshmn-verdict[data-tone=error] .dshmn-verdictTitle{color:var(--dsw-alias-state-error-primary)}
 .dshmn-verdictWhy{margin:0;color:var(--dsw-alias-label-secondary);font-size:14px;line-height:22px}
+/* 人话摘要：服务商 · 主机 → 收件人 · 已开启的事件。只说事实，不下判决。 */
+.dshmn-verdictSummary{margin:0;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px;word-break:break-word}
 .dshmn-verdictFoot{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap;margin-top:4px}
 .dshmn-evidence{display:flex;flex-direction:column;gap:4px;min-width:0;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}
 .dshmn-evidenceKey{color:var(--dsw-alias-label-tertiary)}
 .dshmn-evidence[data-ok=false] .dshmn-evidenceKey{color:var(--dsw-alias-state-error-primary)}
 .dshmn-evidence .dshmn-mono{color:var(--dsw-alias-label-secondary);word-break:break-all}
 
-/* ── 三张卡片：靠 .5px 描边成立，不靠底色（浅色主题下所有 bg-layer 都是纯白）──
+/* ── 三张卡片：card-stroke 描边 + card-fill 底（暗色下才不与页面同色）──────────
    描边 + radius 20 + padding 14 16 + 内部 gap 12，与宿主 settings 的 rowCard 同构。 */
 .dshmn-card{display:flex;flex-direction:column;gap:12px;min-width:0;padding:14px 16px;
-  border:.5px solid var(--dsw-alias-border-l4);border-radius:20px}
+  background:var(--dsw-alias-settings-card-fill);border:.5px solid var(--dsw-alias-settings-card-stroke);border-radius:20px}
 .dshmn-card + .dshmn-card{margin-top:12px}
 .dshmn-verdict + .dshmn-card{margin-top:16px}
 .dshmn-cardHead{display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap;min-width:0}
@@ -651,98 +734,83 @@ window.__ModuleLoader__.load({
 .dshmn-item{display:flex;flex-direction:column;gap:8px;padding:16px 0;min-width:0;
   border-bottom:.5px solid var(--dsw-alias-border-l2)}
 .dshmn-item:last-child{padding-bottom:0;border-bottom:none}
-.dshmn-itemHead{display:flex;align-items:baseline;justify-content:space-between;gap:12px;min-width:0}
-.dshmn-labelRow{display:inline-flex;align-items:center;gap:6px;min-width:0}
+.dshmn-itemHead{display:flex;align-items:baseline;justify-content:space-between;gap:12px 16px;min-width:0;flex-wrap:wrap}
+.dshmn-labelRow{display:inline-flex;align-items:center;gap:8px;min-width:0;flex-wrap:wrap}
 
-/* ── 开关行：标题 14/22·400 + 问号 + 开关。说明折进问号里，默认不占版面 ───────── */
-.dshmn-row{display:flex;flex-direction:column;gap:8px;padding:16px 0;min-width:0;
+/* ── 通知时机：第一行总开关 + 8 个事件三列网格（窄屏一列，不分组）────────────── */
+.dshmn-master{display:flex;flex-direction:column;gap:6px;min-width:0;padding:16px 0 12px;
   border-bottom:.5px solid var(--dsw-alias-border-l2)}
-.dshmn-row:last-child{padding-bottom:0;border-bottom:none}
-.dshmn-rowHead{display:flex;align-items:center;justify-content:space-between;gap:12px;min-width:0}
-.dshmn-rowTitle{display:flex;align-items:center;gap:6px;min-width:0;color:var(--dsw-alias-label-primary);font-size:14px;line-height:22px;font-weight:400}
-.dshmn-rowName{min-width:0}
-.dshmn-rowCtrl{flex:none;display:flex;align-items:center;gap:8px;min-height:22px}
-.dshmn-rowNote{margin:0;max-width:44em;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px}
-/* 问号：原生 button（点击开合，触屏点得到，键盘 tab 得到），16×16 只占一个行内空位 */
-.dshmn-q{flex:none;box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;
-  width:16px;height:16px;padding:0;cursor:pointer;
-  border:.5px solid var(--dsw-alias-border-l4);border-radius:50%;background:none;
-  color:var(--dsw-alias-label-tertiary);font:inherit;font-size:11px;line-height:1}
-.dshmn-q:hover{color:var(--dsw-alias-label-primary);border-color:var(--dsw-alias-border-l3)}
-.dshmn-q[aria-expanded=true]{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover);
-  border-color:var(--dsw-alias-border-l3)}
-
-/* ── 折叠标题（「更多」「还有 3 种情况」）：一行文字按钮，展开后缩进一道竖线 ── */
-.dshmn-fold{display:inline-flex;align-items:center;align-self:flex-start;gap:4px;padding:0;cursor:pointer;
-  border:none;background:none;color:var(--dsw-alias-label-secondary);font:inherit;font-size:13px;line-height:20px;
-  text-decoration:underline;text-underline-offset:3px;text-decoration-color:var(--dsw-alias-border-l4)}
-.dshmn-fold:hover{color:var(--dsw-alias-label-primary)}
-.dshmn-fold[aria-expanded=true]{color:var(--dsw-alias-label-primary);text-decoration:none}
-.dshmn-foldBody{display:flex;flex-direction:column;gap:8px;min-width:0;margin-top:8px;padding-left:12px;
-  border-left:.5px solid var(--dsw-alias-border-l2)}
-.dshmn-q:focus-visible,.dshmn-fold:focus-visible,.dshmn-link:focus-visible,.dshmn-segBtn:focus-visible{
-  outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}
+.dshmn-masterHead{display:flex;align-items:center;justify-content:space-between;gap:12px;min-width:0}
+.dshmn-events{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px 28px;min-width:0;padding-top:4px}
+.dshmn-event{display:flex;flex-direction:column;gap:4px;min-width:0}
+.dshmn-eventHead{display:flex;align-items:center;justify-content:flex-start;gap:8px;min-width:0;min-height:22px;cursor:pointer}
+.dshmn-check{flex:none;width:16px;height:16px;margin:0;accent-color:var(--dsw-alias-brand-primary);cursor:pointer}
+.dshmn-check:disabled{cursor:not-allowed;opacity:.5}
+.dshmn-eventTitle{min-width:0;color:var(--dsw-alias-label-primary);font-size:14px;line-height:22px;font-weight:400}
+.dshmn-eventNote{margin:0;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px}
 
 /* ── 字段：标签在上、控件满宽（宿主 settings 的字段同款）────────────────────── */
 .dshmn-field{display:flex;flex-direction:column;gap:8px;min-width:0}
-.dshmn-label{color:var(--dsw-alias-label-primary);font-size:13px;line-height:1.5;font-weight:500}
+.dshmn-label{color:var(--dsw-alias-label-primary);font-size:13px;line-height:20px;font-weight:500}
 .dshmn-hint{margin:0;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px;max-width:44em}
 .dshmn-error{margin:0;color:var(--dsw-alias-state-error-primary);font-size:12px;line-height:18px;word-break:break-word}
 .dshmn-credState{display:inline-flex;align-items:center;gap:6px;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px}
 .dshmn-credState[data-ok=true]{color:var(--dsw-alias-state-success-primary)}
+.dshmn-credActions{display:inline-flex;align-items:center;gap:12px;flex-wrap:wrap;min-width:0}
 .dshmn-linkRow{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
 
-/* ── 输入 ──────────────────────────────────────────────────────────────── */
+/* ── 输入 ────────────────────────────────────────────────────────────────── */
 /* 宿主的 Input 原语是 content-box 的 inline-flex（padding 0 8px + .5px 描边）,
    所以光给 width:100% 会让它比父级宽出 18px、顶出内容列。必须一起给 border-box。
-   这里是原语缺席时的兜底输入框：底色 / 描边 / 圆角与宿主 Input 对齐（bg-layer-3 + border-l4 + 12）。 */
+   兜底输入框：底色 / 描边 / 圆角与宿主 Input 对齐（bg-layer-1 + border-l4 + 12）。 */
 .dshmn-inputWrap{box-sizing:border-box;display:flex;width:100%;min-width:0}
 .dshmn-inputWrap>*{box-sizing:border-box;width:100%;min-width:0}
-.dshmn-textarea{box-sizing:border-box;width:100%;min-height:52px;padding:8px 10px;resize:vertical;outline:none;
-  border:.5px solid var(--dsw-alias-border-l4);border-radius:12px;background:var(--dsw-alias-bg-layer-3);
+.dshmn-input,.dshmn-select{box-sizing:border-box;width:100%;height:32px;padding:0 10px;outline:none;
+  border:.5px solid var(--dsw-alias-border-l4);border-radius:12px;background:var(--dsw-alias-bg-layer-1);
   color:var(--dsw-alias-label-primary);font:inherit;font-size:14px;line-height:22px}
-.dshmn-textarea::placeholder{color:var(--dsw-alias-label-tertiary)}
-.dshmn-select{box-sizing:border-box;width:100%;height:32px;padding:0 10px;outline:none;
-  border:.5px solid var(--dsw-alias-border-l4);border-radius:12px;background:var(--dsw-alias-bg-layer-3);
-  color:var(--dsw-alias-label-primary);font:inherit;font-size:14px;line-height:22px}
-.dshmn-textarea:focus-visible,.dshmn-select:focus-visible{border-color:var(--dsw-alias-brand-primary);
+.dshmn-input::placeholder{color:var(--dsw-alias-label-tertiary)}
+.dshmn-input:focus-visible,.dshmn-select:focus-visible{border-color:var(--dsw-alias-brand-primary);
   box-shadow:0 0 0 2px var(--dsw-alias-border-l3)}
-.dshmn-textarea[aria-invalid=true]{border-color:var(--dsw-alias-state-error-primary)}
+.dshmn-input[aria-invalid=true]{border-color:var(--dsw-alias-state-error-primary)}
 
-/* 两列：主机 + 用户名。端口 / 加密在「更多」里，同样两列，只是端口窄一点。 */
-.dshmn-two{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px 16px;align-items:start;min-width:0}
-.dshmn-twoPort{display:grid;grid-template-columns:96px minmax(0,1fr);gap:12px 16px;align-items:start;min-width:0}
+/* 主机 / 端口 / 加密 / 用户名：宽屏一行四列（主机与用户名吃剩余宽度，端口与加密固定窄）。 */
+.dshmn-smtpGrid{display:grid;grid-template-columns:minmax(0,1fr) 88px 104px minmax(0,1fr);gap:12px 16px;align-items:start;min-width:0}
 
 /* ── 预设 chips：一行横向滚动（窄屏也不折成三排），滚动条藏起来 ─────────────── */
 .dshmn-chips{display:flex;align-items:center;gap:8px;min-width:0;overflow-x:auto;overflow-y:hidden;padding:2px 0;
   scrollbar-width:none;-ms-overflow-style:none}
 .dshmn-chips::-webkit-scrollbar{display:none}
 .dshmn-segBtn{box-sizing:border-box;flex:none;height:28px;padding:0 12px;cursor:pointer;white-space:nowrap;
-  font:inherit;font-size:12px;line-height:18px;
+  font:inherit;font-size:13px;line-height:18px;
   border:.5px solid var(--dsw-alias-border-l4);border-radius:8px;background:none;
   color:var(--dsw-alias-label-secondary)}
 .dshmn-segBtn:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
-.dshmn-segBtn[data-active=true]{background:var(--dsw-alias-bg-module-platform);border-color:var(--dsw-alias-brand-primary);color:var(--dsw-alias-brand-primary);font-weight:600;
+.dshmn-segBtn[data-active=true]{background:var(--dsw-alias-bg-module-platform);border-color:var(--dsw-alias-brand-primary);
   color:var(--dsw-alias-label-primary);font-weight:600}
 
-/* ── 文字按钮 ──────────────────────────────────────────────────────────── */
+/* ── 文字按钮 ─────────────────────────────────────────────────────────────── */
 .dshmn-link{color:var(--dsw-alias-label-secondary);font:inherit;font-size:13px;line-height:20px;cursor:pointer;
   padding:0;border:none;background:none;text-decoration:underline;text-underline-offset:3px;
   text-decoration-color:var(--dsw-alias-border-l4)}
 .dshmn-link:hover{color:var(--dsw-alias-label-primary)}
 .dshmn-link:disabled{color:var(--dsw-alias-label-tertiary);cursor:default;text-decoration:none}
+.dshmn-link:focus-visible,.dshmn-segBtn:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}
 
-/* ── 页脚与帮助正文：页脚不画线，只留一条 12/18 的链接 ───────────────────── */
+/* ── 页脚与吸底条：页脚只留一条文字链；吸底条常驻底部，只放两个动作 ────────── */
 .dshmn-foot{display:flex;align-items:center;justify-content:flex-end;gap:12px;flex-wrap:wrap;margin-top:16px;padding-top:16px}
 .dshmn-foot .dshmn-link{font-size:12px;line-height:18px}
+.dshmn-savebar{position:sticky;bottom:0;z-index:2;display:flex;align-items:center;justify-content:flex-end;gap:8px;
+  flex-wrap:wrap;margin-top:8px;padding:12px 0;background:var(--dsw-alias-bg-layer-2)}
 .dshmn-helpBody{white-space:pre-wrap;color:var(--dsw-alias-label-secondary);font-size:14px;line-height:22px}
 
-/* ── 窄屏：宿主 settings 页的断点就是 560px ─────────────────────────────── */
+/* ── 窄屏：宿主 settings 页的断点就是 560px ──────────────────────────────── */
 @media (max-width:560px){
   .dshmn-head{flex-direction:column;align-items:stretch;gap:12px}
   .dshmn-headActions{justify-content:flex-start}
   .dshmn-verdictFoot{justify-content:flex-start}
-  .dshmn-two,.dshmn-twoPort{grid-template-columns:minmax(0,1fr)}
+  .dshmn-savebar{justify-content:flex-start}
+  .dshmn-smtpGrid{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}
+  .dshmn-events{grid-template-columns:minmax(0,1fr)}
   .dshmn-card{padding:12px 14px}
 }
 
@@ -765,12 +833,16 @@ window.__ModuleLoader__.load({
     /** 开关。原语缺失时用原生 checkbox 顶上。 */
     function Switch(props) {
       if (typeof P.Switch === 'function') return h(P.Switch, props);
+      // 兜底的 checkbox 要把额外 props 透传下去：事件格子用 data-event、总开关用 data-master
+      // 给自己一个稳定的 DOM 抓手（和宿主用 data-* 是同一个用途），视觉上不占位。
+      const { checked, disabled, label, onChange, ...rest } = props;
       return h('input', {
         type: 'checkbox',
-        checked: props.checked === true,
-        disabled: props.disabled === true,
-        'aria-label': props.label,
-        onChange: () => props.onChange(props.checked !== true),
+        checked: checked === true,
+        disabled: disabled === true,
+        'aria-label': label,
+        onChange: () => onChange(checked !== true),
+        ...rest,
       });
     }
 
@@ -818,7 +890,31 @@ window.__ModuleLoader__.load({
       if (typeof P.Input === 'function') {
         return h(P.Input, { ...rest, className: `dshmn-inputWrap${className === undefined ? '' : ` ${className}`}` });
       }
-      return h('input', { ...rest, className: 'dshmn-textarea', style: { minHeight: 0, height: 32 } });
+      return h('input', { ...rest, className: 'dshmn-input', style: { minHeight: 0, height: 32 } });
+    }
+
+    /**
+     * 勾选框（多选清单用）。
+     *
+     * 事件开关为什么用勾选而不是开关：三列窄格里，拨动式开关没有"把手"，
+     * 一排放三个时分不清哪个属于哪个标题；勾选框贴着标题，读起来就是
+     * 「☑ 任务完成」这种清单句，选中与否一眼可读，也更贴合"我会收到哪些通知"。
+     * 总开关仍用拨动开关——它管的是整件事开不开，语义不同。
+     */
+    function Check(props) {
+      const { checked, disabled, label, onChange, ...rest } = props;
+      // 关键：**不能把 label 作为文本传给宿主原语**——宿主的 Checkbox 会把 label 渲染成
+      // 可见文字，于是标题出现两次（「☑ 任务完成 任务完成」），格子也被撑到换行。
+      // 名字只走 aria-label（读屏需要），可见文字由调用方自己排版。
+      const common = {
+        ...rest,
+        checked: checked === true,
+        disabled: disabled === true,
+        'aria-label': label,
+        onChange: () => onChange(checked !== true),
+      };
+      if (typeof P.Checkbox === 'function') return h(P.Checkbox, common);
+      return h('input', { type: 'checkbox', className: 'dshmn-check', ...common });
     }
 
     /**
@@ -841,9 +937,7 @@ window.__ModuleLoader__.load({
       }, children);
     }
 
-    // 折叠区（「更多」「还有 3 种情况」）统一用下面这个 foldHead 拼在页内：
-    // 开合状态留在 MailNotifyPage 自己的 useState 里，于是「收起时标题带当前值」与
-    // 「开合状态可断言」两件事同时成立；旧的 Disclosure 包装随之删除。
+    // 全页零折叠：这一页没有折叠区、没有「▸ 更多」、也没有问号按钮——所有内容默认都在版面上。
 
     // ---------------------------------------------------------------------------
     // 页面
@@ -869,27 +963,6 @@ window.__ModuleLoader__.load({
           h('h3', { className: 'dshmn-cardTitle' }, title),
           state === undefined ? null : h('span', { className: 'dshmn-cardState' }, state)),
         h('div', { className: 'dshmn-cardBody' }, children));
-    }
-
-    /**
-     * 折叠标题：一行原生按钮（点击开合，键盘 tab 得到），标题自带 ▸/▾ 表示开合状态。
-     *
-     * 不用宿主原语 DisclosureRow：它把标题包进自己的结构里，而这一轮要求
-     * 「收起时把当前值写在标题上」，也需要单测能直接看见开合状态。
-     * @param {string} id 受控内容区的 id（aria-controls）
-     * @param {string} label 标题文字（已含当前值）
-     * @param {boolean} open 是否展开
-     * @param {Function} onToggle 点击开合
-     * @returns {object} React 元素
-     */
-    function foldHead(id, label, open, onToggle) {
-      return h('button', {
-        type: 'button',
-        className: 'dshmn-fold',
-        'aria-expanded': open === true ? 'true' : 'false',
-        'aria-controls': id,
-        onClick: onToggle,
-      }, (open === true ? '▾ ' : '▸ ') + label);
     }
 
     /**
@@ -922,11 +995,6 @@ window.__ModuleLoader__.load({
       const [confirmReset, setConfirmReset] = React.useState(false);
       const [helpKind, setHelpKind] = React.useState(null);
       const [test, setTest] = React.useState({ phase: 'idle', ms: 0, error: '' });
-      const [showMoreOutcomes, setShowMoreOutcomes] = React.useState(false);
-      /** 端口 / 加密收在「更多」里，默认收起（偏离默认值时标题会带上现值）。 */
-      const [moreOpen, setMoreOpen] = React.useState(false);
-      /** 每个事件开关行自己的说明开合：点问号切一行，互不影响。 */
-      const [openHints, setOpenHints] = React.useState({});
 
       const draftRef = React.useRef({});
       const baselineRef = React.useRef({});
@@ -1348,8 +1416,11 @@ window.__ModuleLoader__.load({
       // 配置，用户一点就失败——先被夸一句、再被打一巴掌，比什么都不说更糟。
       const savedRecipients = parseRecipients(baseline.recipients);
       const savedPasswordRef = String(baseline.smtpPasswordRef ?? '').trim();
+      /** 已保存的配置里有几个事件是开的（判决条「事件全关」那一档要用）。 */
+      const savedEventsOn = OUTCOME_FIELDS.filter((item) => baseline[item.field] === true).length;
       const statusKey = deriveStatus({
         enabled: baseline.enabled === true,
+        eventsOn: savedEventsOn,
         recipientCount: savedRecipients.valid.length,
         host: baseline.smtpHost,
         user: baseline.smtpUser,
@@ -1362,6 +1433,7 @@ window.__ModuleLoader__.load({
       const transportState = t(transportReady ? 'transportState.done' : 'transportState.todo');
       const STATUS_TITLE_KEY = {
         disabled: 'status.disabled',
+        allOff: 'status.allOff',
         needRecipients: 'status.needRecipients',
         needHost: 'status.needHost',
         needUser: 'status.needUser',
@@ -1374,9 +1446,7 @@ window.__ModuleLoader__.load({
         : t(STATUS_TITLE_KEY[statusKey] ?? 'status.ready');
       /** 判决下面那句人话：为什么是这个判决、下一步该动哪里。只说用户的事。 */
       const statusWhy = viewRef.current === null ? t('status.notServed') : t(`status.why.${statusKey}`);
-      const outcomesOn = ['notifyCompleted', 'notifyError', 'notifyBlocked', 'notifyApproval',
-        'notifyAbortedByUser', 'notifyInterrupted', 'notifyMaxTokens']
-        .filter((key) => draft[key] === true).length;
+      const outcomesOn = OUTCOME_FIELDS.filter((item) => draft[item.field] === true).length;
       const preset = matchPreset(draft.smtpHost);
       /** 远程桥接有没有接上；没接上时这一页连草稿都读不到，先不给人按钮。 */
       const bridgeReady = remotes.current !== null;
@@ -1454,8 +1524,7 @@ window.__ModuleLoader__.load({
         if (save.phase === 'saving') return [t('save.saving')];
         if (dirtyCount > 0) return [t('save.dirty', { n: dirtyCount })];
         if (save.phase === 'saved' && save.at > 0) {
-          const seconds = Math.max(0, Math.round((now - save.at) / 1000));
-          return [seconds === 0 ? t('save.savedJust') : t('save.savedAgo', { n: seconds })];
+          return [agoText(now - save.at, t)];
         }
         return [t('save.clean')];
       };
@@ -1550,7 +1619,8 @@ window.__ModuleLoader__.load({
       const focusMissing = () => {
         focusField(statusKey === 'needRecipients' ? 'dshmn-recipients'
           : (statusKey === 'needHost' ? 'dshmn-smtp-host'
-            : (statusKey === 'needUser' ? 'dshmn-smtp-user' : 'dshmn-cred-smtp')));
+            : (statusKey === 'needUser' ? 'dshmn-smtp-user'
+              : (statusKey === 'allOff' ? 'dshmn-master' : 'dshmn-cred-smtp'))));
       };
 
       /**
@@ -1582,35 +1652,56 @@ window.__ModuleLoader__.load({
         return null;
       };
       /**
-       * 凭据行。保存前给输入框（这里才是要动手的地方）；保存后**不再摆一个空输入框**——
-       * 那样只会让人怀疑"是不是没存上"。存好之后是：✓ 已保存 + 更换 + 清除（测试入口全页只在判决条一处）。
+       * 授权码行。一行之内四个元素：状态（✓ 已保存 / 有未保存的授权码 / 还没保存）
+       * + 更换 + 清除 + 发送测试邮件（文字链接）。
+       *
+       * 「怎么拿授权码？」改成行内文字链接——问号按钮随「全页零折叠」一起删了。
+       * **只读密码框保留**：存好之后仍然摆着那一格，让人一眼看见"这里有一份东西"。
+       * 脏态诚实化：草稿里有未保存的授权码（或标了清除）时，绝不再显示「✓ 已保存」。
        * @param {string} fieldId 输入框 id
        * @param {string} labelKey 名称文案键
        * @param {string} ref 凭据引用名（写入目标由调用方给定，硬约束 4）
        * @param {string} hintKey 说明文案键
-       * @param {string} helpKey 帮助按钮文案键
+       * @param {string} helpKey 帮助链接文案键
        * @returns {object} React 元素
        */
       const credentialField = (fieldId, labelKey, ref, hintKey, helpKey) => {
         const confirmed = configured(ref);
         // 「更换」只是把输入框展开，不算一项改动；真正待清理的是 pwClear。
         const editing = confirmed !== true || pwEdit[ref] === true;
-        // 「怎么拿授权码？」从行内链接收成标题旁的问号：和 8 个事件开关同一套交互，
-        // 省一行宽度，把位置让给真正的动作（更换 / 清除 / 发送测试邮件）。
-        const helpButton = h('button', {
-          type: 'button',
-          className: 'dshmn-q',
-          'aria-label': t(helpKey),
-          onClick: () => setHelpKind(true),
-        }, '?');
+        const drafting = String(pwDraft[ref] ?? '').trim() !== '' || pwClear[ref] === true;
+        const showSaved = confirmed === true && drafting !== true;
         return h('div', { className: 'dshmn-item' },
           h('div', { className: 'dshmn-itemHead' },
             h('span', { className: 'dshmn-labelRow' },
               h('label', { className: 'dshmn-label', htmlFor: fieldId }, t(labelKey)),
-              helpButton),
-            h('span', { className: 'dshmn-credState', 'data-ok': confirmed ? 'true' : 'false' },
-              confirmed ? h('span', { 'aria-hidden': 'true' }, h(CheckedMark, null)) : null,
-              confirmed ? t('cred.saved') : t('cred.notSaved'))),
+              h('button', {
+                type: 'button',
+                className: 'dshmn-link',
+                onClick: () => setHelpKind(true),
+              }, t(helpKey))),
+            h('span', { className: 'dshmn-credActions' },
+              h('span', { className: 'dshmn-credState', 'data-ok': showSaved ? 'true' : 'false' },
+                showSaved ? h('span', { 'aria-hidden': 'true' }, h(CheckedMark, null)) : null,
+                showSaved ? t('cred.saved') : (drafting ? t('cred.draft') : t('cred.notSaved'))),
+              confirmed
+                ? h('button', {
+                  type: 'button',
+                  className: 'dshmn-link',
+                  onClick: () => setPwEdit((prev) => ({ ...prev, [ref]: true })),
+                }, t('cred.replace'))
+                : null,
+              confirmed
+                ? h('button', {
+                  type: 'button',
+                  className: 'dshmn-link',
+                  onClick: () => {
+                    setPwDraft((prev) => ({ ...prev, [ref]: '' }));
+                    setPwClear((prev) => ({ ...prev, [ref]: true }));
+                  },
+                }, t('cred.clear'))
+                : null,
+              testButton({ variant: 'link' }))),
           editing
             ? h(TextInput, {
               id: fieldId,
@@ -1642,87 +1733,86 @@ window.__ModuleLoader__.load({
                 type: 'button',
                 className: 'dshmn-link',
                 onClick: () => void refreshCredentials([ref]),
-              }, `${t('save.credCheckFailed', { error: credError })}，${t('save.reload')}`)),
-          h('div', { className: 'dshmn-linkRow' },
-            confirmed
-              ? h('button', {
-                type: 'button',
-                className: 'dshmn-link',
-                onClick: () => setPwEdit((prev) => ({ ...prev, [ref]: true })),
-              }, t('cred.replace'))
-              : null,
-            confirmed
-              ? h('button', {
-                type: 'button',
-                className: 'dshmn-link',
-                onClick: () => {
-                  setPwDraft((prev) => ({ ...prev, [ref]: '' }));
-                  setPwClear((prev) => ({ ...prev, [ref]: true }));
-                },
-              }, t('cred.clear'))
-              : null,
-            testButton({ variant: 'link' })));
+              }, `${t('save.credCheckFailed', { error: credError })}，${t('save.reload')}`)));
       };
 
       /**
-       * 一个事件开关的紧凑行：标题 + 问号 + 开关。
+       * 一个事件开关格子：标题 + 开关，说明常显在下面一行（12/18）。
        *
-       * 说明不再常显（8 行说明会把这一组撑成一屏），收进问号后面：**点击**开合而不是 hover，
-       * 触屏点得到；原生 button + aria-expanded / aria-controls，键盘 tab 得到。
-       * 说明文案仍然来自原来那对键（outcomes.*Hint），一个字都没重写。
+       * 全页零折叠：说明不再藏在问号后面，也没有"点一下才知道"的东西。
+       * 8 个格子排成三列网格（窄屏一列），**不分组**——分组标题把并列的开关伪装成
+       * 有层级，用户还得先学会"另外 3 个藏在哪"。
        * @param {string} field 配置字段名
        * @param {string} titleKey 标题文案键
        * @param {string} hintKey 说明文案键
        * @returns {object} React 元素
        */
-      const outcomeRow = (field, titleKey, hintKey) => {
-        const open = openHints[field] === true;
-        const noteId = `dshmn-note-${field}`;
-        return h('div', { className: 'dshmn-row', key: field },
-          h('div', { className: 'dshmn-rowHead' },
-            h('div', { className: 'dshmn-rowTitle' },
-              h('span', { className: 'dshmn-rowName' }, t(titleKey)),
-              h('button', {
-                type: 'button',
-                className: 'dshmn-q',
-                'aria-label': t(open ? 'hint.hide' : 'hint.show', { title: t(titleKey) }),
-                'aria-expanded': open ? 'true' : 'false',
-                'aria-controls': noteId,
-                onClick: () => setOpenHints((prev) => ({ ...prev, [field]: prev[field] !== true })),
-              }, '?')),
-            h('div', { className: 'dshmn-rowCtrl' }, h(Switch, {
-              checked: draft[field] === true,
-              label: t(titleKey),
-              onChange: (next) => setField(field, next),
-            }))),
-          open ? h('p', { className: 'dshmn-rowNote', id: noteId }, t(hintKey)) : null);
-      };
-
-      /**
-       * 「更多」标题上的当前值。
-       *
-       * 端口 / 加密收进折叠区，但"现在到底用什么"必须一眼看得到：只要这一对值偏离宿主
-       * 默认（465 · auto，见 lib/notify/config.js），就把它们摆到标题上。
-       */
-      const draftPort = draft.smtpPort === undefined || draft.smtpPort === null ? '' : String(draft.smtpPort);
-      const draftSecure = String(draft.smtpSecure ?? '');
-      const transportTweaked = (draftPort !== '' && Number(draftPort) !== DEFAULT_TRANSPORT.port)
-        || (draftSecure !== '' && draftSecure !== DEFAULT_TRANSPORT.secure);
-      const transportValue = [draftPort, draftSecure].filter((part) => part !== '').join(' · ');
-      const moreTitle = transportTweaked && transportValue !== ''
-        ? t('transport.moreWith', { value: transportValue })
-        : t('transport.more');
+      const eventCell = (field, titleKey, hintKey) => h('div', { className: 'dshmn-event', key: field },
+        h('label', { className: 'dshmn-eventHead' },
+          h(Check, {
+            checked: draft[field] === true,
+            disabled: draft.enabled === false,
+            label: t(titleKey),
+            'data-event': field,
+            onChange: (next) => setField(field, next),
+          }),
+          h('span', { className: 'dshmn-eventTitle' }, t(titleKey))),
+        h('p', { className: 'dshmn-eventNote' }, t(hintKey)));
 
       /** 收件人那一组的读数：只说个数，落在段头的小字里（不再占一行正文）。 */
       const recipientsState = recipients.valid.length > 0
         ? t('recipients.ok', { n: recipients.valid.length })
         : t('recipients.none');
 
+      /**
+       * 「恢复全部默认」的入口：宿主给了 Modal 就弹确认框；没给就退回 window.confirm。
+       * 两条路都必须点得动——点了什么都不发生，是这一页最不该有的反应。
+       * @returns {void}
+       */
+      const askReset = () => {
+        if (typeof P.Modal === 'function') {
+          setConfirmReset(true);
+          return;
+        }
+        const accepted = typeof window !== 'undefined' && typeof window.confirm === 'function'
+          ? window.confirm(t('danger.body'))
+          : true;
+        if (accepted) void resetAll();
+      };
+
+      // ---- 判决条第三行的「人话摘要」：跟着草稿实时变（判决口径仍是已保存配置）----
+      /** 服务商：认得出来用预设名，认不出来就是「自定义」。 */
+      const summaryProvider = preset === null ? t('summary.custom') : preset.name;
+      const summaryHost = String(draft.smtpHost ?? '').trim() === ''
+        ? t('summary.noHost')
+        : String(draft.smtpHost).trim();
+      const summaryTo = recipients.valid.length === 0
+        ? t('summary.noRecipient')
+        : (recipients.valid.length === 1
+          ? recipients.valid[0]
+          : t('summary.recipients', { n: recipients.valid.length }));
+      const summaryEventNames = OUTCOME_FIELDS
+        .filter((item) => draft[item.field] === true)
+        .map((item) => t(item.short));
+      const summaryEvents = draft.enabled !== true || summaryEventNames.length === 0
+        ? t('summary.eventsOff')
+        : (summaryEventNames.length > 2
+          ? t('summary.eventsMore', { list: summaryEventNames.slice(0, 2).join('、'), n: summaryEventNames.length })
+          : t('summary.events', { list: summaryEventNames.join('、') }));
+      const summaryLine = t('summary.line', {
+        provider: summaryProvider,
+        host: summaryHost,
+        to: summaryTo,
+        events: summaryEvents,
+      });
+      /** 总开关关着时，8 个事件开关变灰禁用（但不隐藏）。 */
+      const eventsDisabled = draft.enabled === false;
+      /** 页头那组按钮与吸底条共用同一份可用条件（脏读数只在页头）。 */
+      const actionDisabled = dirtyCount === 0 || !bridgeReady || save.phase === 'saving';
+
       return h('div', { className: 'dshmn-page', 'data-build': BUILD },
 
-        // ---- 页头：标题独占一行（18/600），右上只有动作组 ----
-        // 「脏读数 + 保存 + 放弃改动」是一个动作区：不画线、不放说明、不占第二层高度。
-        // 宿主的设置面板头（h54）只放 actions + close，所以内容区第一行就该是标题。
+        // ---- 页头（吸顶）：标题 + 一行说明；右侧脏读数 + 保存 + 放弃改动 ----
         h('header', { className: 'dshmn-head' },
           h('div', { className: 'dshmn-headText' },
             h('h2', { className: 'dshmn-title' }, t('nav')),
@@ -1737,18 +1827,18 @@ window.__ModuleLoader__.load({
               variant: 'primary',
               size: 'sm',
               // 没有改动就禁用：主按钮不该在无事可做时还亮着。
-              disabled: dirtyCount === 0 || !bridgeReady || save.phase === 'saving',
+              disabled: actionDisabled,
               title: t('act.saveHint'),
               onClick: () => void saveAll(),
             }, t('act.save')),
             h(Button, {
               variant: 'outline',
               size: 'sm',
-              disabled: dirtyCount === 0 || !bridgeReady || save.phase === 'saving',
+              disabled: actionDisabled,
               onClick: () => discardAll(),
             }, t('act.discard')))),
 
-        // ---- 判决条：全页唯一的填充面（状态色 hero）；结论句 + 右下角那处主行动 ----
+        // ---- 判决条：全页唯一的状态色 hero；结论句 + 人话摘要 + 右下角主行动 ----
         h('section', {
           className: 'dshmn-verdict',
           'data-tone': tone,
@@ -1759,6 +1849,8 @@ window.__ModuleLoader__.load({
           h(Dot, { state: tone === 'done' ? 'done' : (tone === 'error' ? 'error' : (tone === 'warning' ? 'warning' : 'idle')) }),
           h('h2', { className: 'dshmn-verdictTitle' }, statusTitle)),
         h('p', { className: 'dshmn-verdictWhy' }, statusWhy),
+        // 人话摘要：一眼看全「哪家邮箱 · 哪个服务器 → 发给谁 · 什么时候发」。
+        h('p', { className: 'dshmn-verdictSummary' }, summaryLine),
         // 口径明写：这句判决算的是**已保存的配置**，屏幕上没保存的改动不算数。
         dirtyCount > 0 ? h('p', { className: 'dshmn-hint' }, t('status.unsavedDraft')) : null,
         testResult(),
@@ -1769,9 +1861,10 @@ window.__ModuleLoader__.load({
         h('div', { className: 'dshmn-item' },
         h('div', { className: 'dshmn-field' },
           h('label', { className: 'dshmn-label', htmlFor: 'dshmn-recipients' }, t('recipients.label')),
-          h('textarea', {
+          // 单行输入：粘贴逗号 / 分号 / 换行分隔的多个地址照样一个不丢（解析函数没动）。
+          h(TextInput, {
             id: 'dshmn-recipients',
-            className: 'dshmn-textarea',
+            type: 'text',
             value: draft.recipients ?? '',
             placeholder: t('recipients.placeholder'),
             'aria-invalid': recipients.invalid.length > 0 ? 'true' : 'false',
@@ -1782,7 +1875,7 @@ window.__ModuleLoader__.load({
             ? h('div', { className: 'dshmn-error', role: 'alert' }, t('recipients.invalid', { list: recipients.invalid.join('、') }))
             : null))),
 
-        // ---- 卡片二：怎么发（只剩 SMTP 一种发送方式，不再让人选通道）----
+        // ---- 卡片二：发信方式（只剩 SMTP 一种发送方式，不再让人选通道）----
         h(Card, { kind: 'transport', title: t('group.transport'), state: transportState },
         h('div', { className: 'dshmn-item' },
           h('div', { className: 'dshmn-hint' }, t('smtp.note')),
@@ -1808,8 +1901,9 @@ window.__ModuleLoader__.load({
             }, t('preset.other'))),
           preset === null ? null : h('div', { className: 'dshmn-hint' }, t('preset.detected', { name: preset.name })),
 
-          // 主行：主机 + 用户名（两列）。端口 / 加密折进下面的「更多」。
-          h('div', { className: 'dshmn-two' },
+          // 主机 / 端口 / 加密 / 用户名：宽屏一行四列（主机与用户名吃剩余宽度），
+          // 窄屏两行两列。端口与加密**默认可见**——它们是发不发得出去的一部分，不该藏在折叠里。
+          h('div', { className: 'dshmn-smtpGrid' },
             h('div', { className: 'dshmn-field' },
               h('label', { className: 'dshmn-label', htmlFor: 'dshmn-smtp-host' }, t('smtp.host')),
               h(TextInput, {
@@ -1819,6 +1913,33 @@ window.__ModuleLoader__.load({
                 placeholder: 'smtp.example.com',
                 onChange: (event) => setField('smtpHost', event.target.value),
               })),
+            h('div', { className: 'dshmn-field' },
+              h('label', { className: 'dshmn-label', htmlFor: 'dshmn-smtp-port' }, t('smtp.port')),
+              h(TextInput, {
+                id: 'dshmn-smtp-port',
+                type: 'text',
+                inputMode: 'numeric',
+                value: draft.smtpPort ?? '',
+                placeholder: '465',
+                'aria-label': t('smtp.port'),
+                onChange: (event) => {
+                  const raw = String(event.target.value ?? '');
+                  // 端口只收数字。Number('46a') 是 NaN：宿主会拒写，但报的是英文 SDK 错误，
+                  // 而且 NaN 跟谁都不相等，脏计数会一直挂着不清。非法字符根本别进草稿——
+                  // 受控输入会把框里的内容退回上一次的合法值。
+                  if (raw !== '' && !/^\d+$/.test(raw)) return;
+                  setField('smtpPort', raw === '' ? '' : Number(raw));
+                },
+              })),
+            h('div', { className: 'dshmn-field' },
+              h('label', { className: 'dshmn-label', htmlFor: 'dshmn-smtp-secure' }, t('smtp.secure')),
+              h('select', {
+                id: 'dshmn-smtp-secure',
+                className: 'dshmn-select',
+                value: draft.smtpSecure ?? 'auto',
+                onChange: (event) => setField('smtpSecure', event.target.value),
+              }, ...[['auto', 'auto'], ['tls', 'tls'], ['starttls', 'starttls'], ['plain', 'plain']]
+                .map(([value, text]) => h('option', { key: value, value }, text)))),
             h('div', { className: 'dshmn-field' },
               h('label', { className: 'dshmn-label', htmlFor: 'dshmn-smtp-user' }, t('smtp.user')),
               h(TextInput, {
@@ -1835,76 +1956,53 @@ window.__ModuleLoader__.load({
                   user: String(draft.smtpUser ?? ''),
                   suffix: preset?.suffix ?? '',
                 }))
-                : null)),
-
-          // 端口 / 加密：默认收起。收起时标题上写清当前值（偏离默认才有内容），
-          // 所以"收起来"不等于"藏起来"——想知道现在用什么，看一眼标题就够。
-          h('div', { className: 'dshmn-field' },
-            foldHead('dshmn-more-transport', moreTitle, moreOpen, () => setMoreOpen((value) => value !== true)),
-            moreOpen !== true
-              ? null
-              : h('div', { className: 'dshmn-foldBody', id: 'dshmn-more-transport' },
-                h('div', { className: 'dshmn-twoPort' },
-                  h('div', { className: 'dshmn-field' },
-                    h('label', { className: 'dshmn-label', htmlFor: 'dshmn-smtp-port' }, t('smtp.port')),
-                    h(TextInput, {
-                      id: 'dshmn-smtp-port',
-                      type: 'text',
-                      inputMode: 'numeric',
-                      value: draft.smtpPort ?? '',
-                      placeholder: '465',
-                      'aria-label': t('smtp.port'),
-                      onChange: (event) => {
-                        const raw = String(event.target.value ?? '');
-                        // 端口只收数字。Number('46a') 是 NaN：宿主会拒写，但报的是英文 SDK 错误，
-                        // 而且 NaN 跟谁都不相等，脏计数会一直挂着不清。非法字符根本别进草稿——
-                        // 受控输入会把框里的内容退回上一次的合法值。
-                        if (raw !== '' && !/^\d+$/.test(raw)) return;
-                        setField('smtpPort', raw === '' ? '' : Number(raw));
-                      },
-                    })),
-                  h('div', { className: 'dshmn-field' },
-                    h('label', { className: 'dshmn-label', htmlFor: 'dshmn-smtp-secure' }, t('smtp.secure')),
-                    h('select', {
-                      id: 'dshmn-smtp-secure',
-                      className: 'dshmn-select',
-                      value: draft.smtpSecure ?? 'auto',
-                      onChange: (event) => setField('smtpSecure', event.target.value),
-                    }, ...[['auto', 'auto'], ['tls', 'tls'], ['starttls', 'starttls'], ['plain', 'plain']]
-                      .map(([value, text]) => h('option', { key: value, value }, text)))))))),
+                : null))),
         credentialField('dshmn-cred-smtp', 'cred.smtp', smtpPasswordRef, 'cred.smtpHint', 'cred.smtpHelp')),
 
-        // ---- 卡片三：什么时候发给我（8 个开关单列，宿主同款行；窄屏最稳）----
-        // 说明不再常显：每行标题旁一个问号，点开才显示那一行的说明（文案键原样复用）。
+        // ---- 卡片三：通知时机（第一行总开关；下面 8 个事件三列网格，说明常显）----
         h(Card, {
           kind: 'outcomes',
           title: t('group.outcomes'),
           state: outcomesOn > 0 ? t('outcomes.countOn', { n: outcomesOn }) : t('outcomes.countOff'),
         },
-        outcomeRow('notifyCompleted', 'outcomes.completed', 'outcomes.completedHint'),
-        outcomeRow('notifyError', 'outcomes.error', 'outcomes.errorHint'),
-        outcomeRow('notifyBlocked', 'outcomes.blocked', 'outcomes.blockedHint'),
-        outcomeRow('notifyApproval', 'outcomes.approval', 'outcomes.approvalHint'),
-        outcomeRow('includeSubagents', 'outcomes.subagents', 'outcomes.subagentsHint'),
-        h('div', { className: 'dshmn-item' },
-          foldHead('dshmn-more-outcomes', t('outcomes.more'), showMoreOutcomes,
-            () => setShowMoreOutcomes((value) => value !== true)),
-          showMoreOutcomes !== true
-            ? null
-            : h('div', { className: 'dshmn-foldBody', id: 'dshmn-more-outcomes' },
-              outcomeRow('notifyAbortedByUser', 'outcomes.aborted', 'outcomes.abortedHint'),
-              outcomeRow('notifyInterrupted', 'outcomes.interrupted', 'outcomes.interruptedHint'),
-              outcomeRow('notifyMaxTokens', 'outcomes.maxTokens', 'outcomes.maxTokensHint')))),
+        h('div', { className: 'dshmn-master' },
+          h('div', { className: 'dshmn-masterHead' },
+            h('span', { className: 'dshmn-label' }, t('notify.master')),
+            h(Switch, {
+              id: 'dshmn-master',
+              checked: draft.enabled === true,
+              label: t('notify.master'),
+              'data-master': 'true',
+              onChange: (next) => setField('enabled', next),
+            })),
+          h('p', { className: 'dshmn-hint' }, t('notify.masterHint'))),
+        h('div', { className: 'dshmn-events' },
+          ...OUTCOME_FIELDS.map((item) => eventCell(item.field, item.title, item.hint)))),
 
-        // ---- 页脚：清空覆盖是破坏性操作，所以压到最下面、只用一条 12/18 的文字链接 ----
-        // 页脚不画线：线只长在行自己身上，页脚不是一段内容。
+        // ---- 页脚：清空覆盖是破坏性操作，压到页面最底部、只用一条文字链接 ----
         h('div', { className: 'dshmn-foot' },
           h('button', {
             type: 'button',
             className: 'dshmn-link',
             disabled: resetting,
-            onClick: () => setConfirmReset(true),
+            onClick: askReset,
           }, t('danger.reset'))),
+
+        // ---- 吸底条：常驻底部，只放两个动作（脏读数只在页头）----
+        h('div', { className: 'dshmn-savebar' },
+          h(Button, {
+            variant: 'outline',
+            size: 'sm',
+            disabled: actionDisabled,
+            onClick: () => discardAll(),
+          }, t('act.discard')),
+          h(Button, {
+            variant: 'primary',
+            size: 'sm',
+            disabled: actionDisabled,
+            title: t('act.saveHint'),
+            onClick: () => void saveAll(),
+          }, t('act.save'))),
 
         typeof P.Modal === 'function'
           ? h(P.Modal, {
@@ -2049,7 +2147,7 @@ window.__ModuleLoader__.load({
         }
       },
       /** 给离线单测用的接线口（浏览器运行时不会读它）。 */
-      __internals: { parseRecipients, deriveStatus, matchPreset, presetForAddress, dotState, accountMismatch, userForPreset, PRESETS, ZH, EN, CSS, fmt, diffOps, i18n },
+      __internals: { parseRecipients, deriveStatus, matchPreset, presetForAddress, dotState, accountMismatch, userForPreset, PRESETS, ZH, EN, CSS, fmt, diffOps, agoText, i18n },
     };
   },
 });
