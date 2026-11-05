@@ -36,7 +36,7 @@ const ZH = {
   err401: '登录已过期，请刷新页面重新登录',
   err403: '没有权限读取这个文件',
   err404: '文件不存在或已被删除',
-  err413: '文件超过 20MB，暂不支持下载',
+  err413: '文件太大，超出服务器允许的下载上限',
   errNetwork: '下载失败，请检查连接',
 };
 
@@ -428,6 +428,68 @@ function makeRows(document, specs) {
 
 function menuButton(row) { return row.querySelector('[data-lookout-rowmenu]'); }
 
+/**
+ * 宿主升级前后的两套行夹具，各含 1 个目录行 + 1 个文件行 + 1 个 other 行。
+ *   legacy  (sidebar-files 0.2.1)：li > button.row
+ *   current (sidebar-files 0.2.2)：li > div.row > (button.action, div.accessory)
+ *                                  目录行再带一个 <ul class="level">
+ * other 行的 action 是 span（不是 button），本功能本来就不碰它。
+ */
+const THREE_ROWS = [
+  { entry: 'directory', path: '/root/work/src', label: 'src' },
+  { entry: 'file', path: '/root/work/README.md', label: 'README.md' },
+  { entry: 'other', path: '/root/work/__other__', label: 'other' },
+];
+
+/** 按宿主形状建树；spec.accessory === false 时新结构行不带 accessory（宿主可变布局）。 */
+function makeTree(document, shape, specs = THREE_ROWS) {
+  const body = document.createElement('div');
+  body.setAttribute('data-files-body', '');
+  document.body.appendChild(body);
+  const rows = specs.map((spec) => {
+    const row = document.createElement('li');
+    row.setAttribute('data-files-entry', spec.entry);
+    row.setAttribute('data-files-path', spec.path);
+    const isRow = spec.entry !== 'other';
+    if (shape === 'legacy') {
+      if (isRow) {
+        const button = document.createElement('button');
+        button.className = 'row';
+        button.textContent = spec.label;
+        button.style.paddingRight = '4px';
+        row.appendChild(button);
+      } else {
+        const span = document.createElement('span');
+        span.className = 'action other';
+        span.textContent = spec.label;
+        row.appendChild(span);
+      }
+    } else {
+      const line = document.createElement('div');
+      line.className = 'row';
+      const action = document.createElement(isRow ? 'button' : 'span');
+      action.className = 'action';
+      action.textContent = spec.label;
+      if (isRow) action.style.paddingRight = '4px';
+      line.appendChild(action);
+      if (spec.accessory !== false) {
+        const accessory = document.createElement('div');
+        accessory.className = 'accessory';
+        line.appendChild(accessory);
+      }
+      row.appendChild(line);
+      if (spec.entry === 'directory') {
+        const level = document.createElement('ul');
+        level.className = 'level';
+        row.appendChild(level);
+      }
+    }
+    body.appendChild(row);
+    return row;
+  });
+  return { body, rows };
+}
+
 function openMenu(row) {
   const button = menuButton(row);
   assert.ok(button, '该行必须先有 ⋯ 按钮');
@@ -814,4 +876,174 @@ test('整份 bundle：胶水层 apply() 先启动文件行菜单（不依赖三�
   try { mod.apply(ctx); } catch { /* 三份原插件段在这里被主动打断，不影响断言 */ }
   assert.equal(effects.some((item) => item.label === 'dsh-lookout: file row menu'), true,
     'apply() 必须在跑三段原插件之前挂上文件行菜单');
+});
+
+// ------------------------------------------------- 宿主行结构兼容（0.2.2）----
+
+test('新结构（0.2.2）：⋯ 挂在 div.accessory 里并改为行内布局，li 与行按钮的 inline style 一律不动', () => {
+  const env = createEnv();
+  const { rows } = makeTree(env.document, 'current');
+  const { dispose } = install(env);
+  env.scheduler.tick(200);
+
+  assert.equal(env.document.querySelectorAll('[data-lookout-rowmenu]').length, 2, '目录行 + 文件行各一个');
+  assert.equal(rows[2].querySelectorAll('[data-lookout-rowmenu]').length, 0, 'other 行不许注入');
+  for (const row of rows.slice(0, 2)) {
+    assert.equal(row.querySelectorAll('[data-lookout-rowmenu]').length, 1, '每行有且仅有 1 个');
+    const anchor2 = menuButton(row);
+    assert.equal(anchor2.parentNode === row.querySelector('div.accessory'), true, '⋯ 的父节点必须是宿主自己的 accessory');
+    assert.equal(anchor2.matches('.dsh-lookout-rowmenu--inline'), true, '新结构必须带行内修饰类');
+    assert.equal(row.style.position, '', '新结构不许给 li 设 position');
+    assert.equal(row.querySelector('button.action').style.paddingRight, '4px', '新结构不许给行按钮让位');
+  }
+  assert.equal(rows[0].querySelector('ul.level').querySelectorAll('[data-lookout-rowmenu]').length, 0,
+    '目录行的 ul.level 子层不该被误注入');
+  dispose();
+});
+
+test('新结构：行里没有 accessory 时 ⋯ 追加到 div.row 末尾，仍然行内、仍然不动行样式', () => {
+  const env = createEnv();
+  const specs = THREE_ROWS.map((spec) => ({ ...spec, accessory: false }));
+  const { rows } = makeTree(env.document, 'current', specs);
+  const { dispose } = install(env);
+  env.scheduler.tick(200);
+
+  assert.equal(env.document.querySelectorAll('[data-lookout-rowmenu]').length, 2);
+  for (const row of rows.slice(0, 2)) {
+    const anchor2 = menuButton(row);
+    const line = row.querySelector('div.row');
+    assert.equal(anchor2.parentNode === line, true, '没有 accessory 就退化挂到 div.row');
+    assert.equal(line.children[line.children.length - 1] === anchor2, true, '必须追加到 div.row 末尾');
+    assert.equal(anchor2.matches('.dsh-lookout-rowmenu--inline'), true);
+    assert.equal(row.style.position, '', '没有 accessory 也不许改行样式');
+    assert.equal(line.querySelector('button.action').style.paddingRight, '4px');
+  }
+  dispose();
+});
+
+test('老结构回归（0.2.1）：li > button.row 仍走绝对定位那条路，样式让位照旧', () => {
+  const env = createEnv();
+  const { rows } = makeTree(env.document, 'legacy');
+  const { dispose } = install(env);
+  env.scheduler.tick(200);
+
+  const row = rows[1];
+  const hostButton = row.querySelector('button.row');
+  const anchor2 = menuButton(row);
+  assert.ok(anchor2, '老结构必须照样注入');
+  assert.equal(row.style.position, 'relative', 'li 要成为 ⋯ 的定位参照');
+  assert.equal(hostButton.style.paddingRight, '32px', '行按钮右侧要给 ⋯ 让位');
+  assert.equal(anchor2.parentNode === row, true, '⋯ 仍是 li 的直接子节点（兄弟，不嵌套）');
+  assert.equal(row.children[row.children.length - 1] === anchor2, true, '⋯ 紧跟在行按钮之后');
+  assert.equal(anchor2.matches('.dsh-lookout-rowmenu--inline'), false, '老结构不带行内修饰类');
+  assert.equal(rows[2].querySelectorAll('[data-lookout-rowmenu]').length, 0, 'other 行仍然不许注入');
+  dispose();
+});
+
+test('幂等：两种结构连扫 3 轮，每行仍然只有一个 ⋯', () => {
+  for (const shape of ['legacy', 'current']) {
+    const env = createEnv();
+    const { rows } = makeTree(env.document, shape);
+    const { dispose } = install(env);
+    for (let round = 1; round <= 3; round++) {
+      env.scheduler.tick(300);
+      env.observers[0].trigger();
+      env.scheduler.tick(200);
+      assert.equal(env.document.querySelectorAll('[data-lookout-rowmenu]').length, 2, shape + ' 第 ' + round + ' 轮总数');
+      for (const row of rows.slice(0, 2)) {
+        assert.equal(row.querySelectorAll('[data-lookout-rowmenu]').length, 1, shape + ' 第 ' + round + ' 轮每行只有一个');
+      }
+    }
+    dispose();
+  }
+});
+
+test('宿主重渲染：accessory 被清空后下一轮自动补回，且不会变成两个', () => {
+  const env = createEnv();
+  const { rows } = makeTree(env.document, 'current');
+  const { dispose } = install(env);
+  env.scheduler.tick(200);
+
+  const accessory = rows[1].querySelector('div.accessory');
+  for (const child of [...accessory.children]) accessory.removeChild(child);
+  assert.equal(rows[1].querySelectorAll('[data-lookout-rowmenu]').length, 0, '先确认宿主把 ⋯ 冲掉了');
+
+  env.scheduler.tick(300);
+  env.observers[0].trigger();
+  env.scheduler.tick(200);
+  assert.equal(rows[1].querySelectorAll('[data-lookout-rowmenu]').length, 1, '必须自动补回且只有一个');
+  assert.equal(menuButton(rows[1]).parentNode === accessory, true, '补回后仍挂在同一个 accessory 里');
+  dispose();
+});
+
+test('结构切换：同一行从老结构换成新结构后，仍然只有一个 ⋯ 且被搬进 accessory', () => {
+  const env = createEnv();
+  const { rows } = makeTree(env.document, 'legacy');
+  const { dispose } = install(env);
+  env.scheduler.tick(200);
+
+  const row = rows[1];
+  const anchor2 = menuButton(row);
+  for (const child of [...row.children]) if (child !== anchor2) row.removeChild(child);
+  const line = env.document.createElement('div');
+  line.className = 'row';
+  const action = env.document.createElement('button');
+  action.className = 'action';
+  action.textContent = 'README.md';
+  line.appendChild(action);
+  const accessory = env.document.createElement('div');
+  accessory.className = 'accessory';
+  line.appendChild(accessory);
+  row.appendChild(line);
+
+  env.scheduler.tick(300);
+  env.observers[0].trigger();
+  env.scheduler.tick(200);
+  assert.equal(row.querySelectorAll('[data-lookout-rowmenu]').length, 1, '换结构不许出现第二个 ⋯');
+  assert.equal(anchor2.parentNode === accessory, true, '发现结构变化后要把它搬进新的 accessory');
+  assert.equal(anchor2.matches('.dsh-lookout-rowmenu--inline'), true, '搬到新结构后要换成行内布局');
+  dispose();
+});
+
+test('清理：dispose 后两种结构的 ⋯ 全消失；老结构还原改过的 inline style，新结构本来就什么都没改', () => {
+  // 老结构：确实改过 li 的 position 与行按钮的 paddingRight，必须逐一还原。
+  const legacyEnv = createEnv();
+  const legacyTree = makeTree(legacyEnv.document, 'legacy');
+  const legacyInstalled = install(legacyEnv);
+  legacyEnv.scheduler.tick(200);
+  const legacyHostButton = legacyTree.rows[1].querySelector('button.row');
+  assert.equal(legacyTree.rows[0].style.position, 'relative');
+  assert.equal(legacyHostButton.style.paddingRight, '32px');
+  legacyInstalled.dispose();
+  assert.equal(legacyEnv.document.querySelectorAll('[data-lookout-rowmenu]').length, 0, '老结构 ⋯ 必须全删');
+  assert.equal(legacyTree.rows[0].style.position, '', '老结构 li 的 inline position 必须还原');
+  assert.equal(legacyHostButton.style.paddingRight, '4px', '老结构行按钮的 inline paddingRight 必须还原成原值');
+
+  // 新结构：从头到尾没写过任何 inline style，dispose 后也保持原样。
+  const currentEnv = createEnv();
+  const currentTree = makeTree(currentEnv.document, 'current');
+  const currentInstalled = install(currentEnv);
+  currentEnv.scheduler.tick(200);
+  assert.equal(currentEnv.document.querySelectorAll('[data-lookout-rowmenu]').length, 2);
+  currentInstalled.dispose();
+  assert.equal(currentEnv.document.querySelectorAll('[data-lookout-rowmenu]').length, 0, '新结构 ⋯ 必须全删');
+  assert.equal(currentEnv.document.querySelectorAll('div.accessory').length, 3, '只删 ⋯，宿主 accessory 本身要留着');
+  for (const row of currentTree.rows.slice(0, 2)) {
+    assert.equal(row.style.position, '', '新结构 li 从未被改过');
+    assert.equal(row.querySelector('button.action').style.paddingRight, '4px', '新结构行按钮从未被改过');
+  }
+});
+
+test('CSS：行内修饰类覆盖绝对定位，尺寸与配色继续继承 .dsh-lookout-rowmenu', () => {
+  const env = createEnv();
+  makeTree(env.document, 'current');
+  const { api, dispose } = install(env);
+  env.scheduler.tick(200);
+
+  const css = api.ROW_MENU_CSS;
+  assert.match(css, /\.dsh-lookout-rowmenu--inline\{position:static;top:auto;right:auto;flex:none;\}/,
+    '行内修饰类必须把 absolute 定位覆盖成 static');
+  const styleTag = env.document.querySelector('style[data-plugin-css="lookout-row-menu"]');
+  assert.equal(styleTag.textContent, css, '样式标签必须带上这条规则');
+  dispose();
 });

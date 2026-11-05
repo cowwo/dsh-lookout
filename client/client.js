@@ -7264,13 +7264,17 @@ window.__ModuleLoader__.load({
    * pair, no React for the menu itself, and nothing but DOM writes into the
    * shipped file tree.
    *
-   * Host contract (read-only reference: @deepseek-ai/dsh-client-ui-sidebar-files):
-   *   [data-files-body] li[data-files-entry="file"|"directory"][data-files-path]
-   *     > button.row
+   * Host contract (read-only reference: @deepseek-ai/dsh-client-ui-sidebar-files).
+   * Two shapes ship today and both are supported:
+   *   legacy  (0.2.1): li > button
+   *   current (0.2.2): li > div.row > (button.action, div.accessory), and an
+   *                    expanded directory keeps its <ul class="level"> beside div.row
    * The absolute path is ALWAYS read from data-files-path; it is never rebuilt
-   * from the row text. Rows of type "other" are left alone. The menu button is
-   * inserted as a SIBLING after that row button, never inside it: a nested
-   * button is invalid HTML and its click would bubble into "open this file".
+   * from the row text. Rows of type "other" are left alone. In the legacy shape
+   * the menu button is inserted as a SIBLING after that row button; in the
+   * current shape it becomes one more item inside the host's own accessory slot.
+   * Either way it is never nested inside the host's button: a nested button is
+   * invalid HTML and its click would bubble into "open this file".
    *
    * Every entry point is guarded. A selector that stops matching after a host
    * upgrade can only cost these buttons, never the host's own rendering; three
@@ -7279,6 +7283,10 @@ window.__ModuleLoader__.load({
   const ROW_MENU_NS = "dsh-lookout";
   /** Sibling button injected after the row button; its presence is the idempotency key. */
   const ROW_MENU_ATTR = "data-lookout-rowmenu";
+  /** Modifier for the current host shape: inline inside the host's accessory slot. */
+  const ROW_MENU_INLINE_CLASS = "dsh-lookout-rowmenu--inline";
+  /** The host's right-hand slot inside li > div.row (sidebar-files 0.2.2). */
+  const ROW_MENU_ACCESSORY_CLASS = "accessory";
   const ROW_MENU_POP_ATTR = "data-lookout-rowmenu-pop";
   const ROW_MENU_TOAST_ATTR = "data-lookout-toast";
   const ROW_MENU_STYLE_KEY = "lookout-row-menu";
@@ -7315,7 +7323,7 @@ window.__ModuleLoader__.load({
     folderUnsupported: "文件夹暂不支持",
     copyFailed: "复制失败，请手动选择路径",
     err401: "登录已过期，请刷新页面重新登录",
-    err413: "文件超过 20MB，暂不支持下载",
+    err413: "文件太大，超出服务器允许的下载上限",
     err404: "文件不存在或已被删除",
     err403: "没有权限读取这个文件",
     errOther: "下载失败（HTTP {status}）",
@@ -7333,7 +7341,7 @@ window.__ModuleLoader__.load({
     folderUnsupported: "Folders not supported",
     copyFailed: "Copy failed — select the path and copy it manually",
     err401: "Your session has expired. Refresh the page and sign in again.",
-    err413: "This file is larger than 20 MB and cannot be downloaded yet.",
+    err413: "This file is larger than the server's download limit.",
     err404: "The file no longer exists or was deleted.",
     err403: "You do not have permission to read this file.",
     errOther: "Download failed (HTTP {status}).",
@@ -7348,6 +7356,7 @@ window.__ModuleLoader__.load({
    */
   const ROW_MENU_CSS = [
     ".dsh-lookout-rowmenu{position:absolute;top:4px;right:4px;z-index:2;display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;padding:0;border:0;border-radius:6px;background:transparent;color:var(--dsw-alias-label-tertiary);cursor:pointer;line-height:1;touch-action:manipulation;-webkit-tap-highlight-color:transparent;}",
+    ".dsh-lookout-rowmenu--inline{position:static;top:auto;right:auto;flex:none;}",
     ".dsh-lookout-rowmenu:hover,.dsh-lookout-rowmenu:focus-visible{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover);outline:none;}",
     ".dsh-lookout-rowmenu svg{display:block;width:16px;height:16px;pointer-events:none;}",
     ".dsh-lookout-rowmenu[data-lookout-copied]{color:var(--dsw-alias-state-success-primary);}",
@@ -7527,27 +7536,113 @@ window.__ModuleLoader__.load({
     }
 
     // ---- injected row button -------------------------------------------
-    function directRowButton(row) {
-      for (const child of row.children) {
-        if (child.tagName === "BUTTON" && child.getAttribute(ROW_MENU_ATTR) === null) return child;
+    /** True for one of our own ⋯ buttons, whichever shape it currently sits in. */
+    function isMenuButton(node) {
+      return node !== null && node !== undefined && typeof node.getAttribute === "function" && node.getAttribute(ROW_MENU_ATTR) !== null;
+    }
+
+    /** classList when the DOM has one, className text otherwise (svg / minimal hosts). */
+    function hasClass(node, name) {
+      if (node === null || node === undefined) return false;
+      const list = node.classList;
+      if (list !== undefined && list !== null && typeof list.contains === "function") {
+        try { return list.contains(name) === true; } catch { /* fall back to className */ }
+      }
+      const raw = node.className;
+      const text = typeof raw === "string" ? raw : raw !== null && raw !== undefined && typeof raw.baseVal === "string" ? raw.baseVal : "";
+      return text.split(/\s+/).indexOf(name) >= 0;
+    }
+
+    /** Toggle the inline modifier without touching any other class on the button. */
+    function setInlineClass(button, inline) {
+      if (hasClass(button, ROW_MENU_INLINE_CLASS) === inline) return;
+      const list = button.classList;
+      if (list !== undefined && list !== null && typeof list.add === "function" && typeof list.remove === "function") {
+        try {
+          if (inline) list.add(ROW_MENU_INLINE_CLASS);
+          else list.remove(ROW_MENU_INLINE_CLASS);
+          return;
+        } catch { /* fall back to className */ }
+      }
+      const kept = String(button.className === null || button.className === undefined ? "" : button.className)
+        .split(/\s+/)
+        .filter((item) => item !== "" && item !== ROW_MENU_INLINE_CLASS);
+      if (inline) kept.push(ROW_MENU_INLINE_CLASS);
+      button.className = kept.join(" ");
+    }
+
+    /** The host's own row button: first direct child BUTTON that is not ours. */
+    function directRowButton(container) {
+      for (const child of container.children) {
+        if (child.tagName === "BUTTON" && !isMenuButton(child)) return child;
       }
       return null;
     }
 
+    /**
+     * Split one row into the host's button and the slot our ⋯ may occupy.
+     *
+     * Both shipped shapes are accepted, so an upgrade (or a rollback) never costs
+     * the menu:
+     *   legacy  0.2.1: li > button
+     *   current 0.2.2: li > div.row > (button.action, div.accessory)
+     * The accessory is found by class alone and may sit before or after the
+     * button; when a row has none, the ⋯ is appended to div.row itself.
+     * @param row - one li[data-files-entry] row.
+     * @returns {{rowButton: Element, mount: Element|null, legacy: boolean}|null} null when the row matches neither shape.
+     */
+    function rowParts(row) {
+      const legacyButton = directRowButton(row);
+      if (legacyButton !== null) return { rowButton: legacyButton, mount: null, legacy: true };
+      for (const child of row.children) {
+        if (child.tagName !== "DIV") continue;
+        const rowButton = directRowButton(child);
+        if (rowButton === null) continue;
+        let mount = null;
+        for (const inner of child.children) {
+          if (inner.tagName === "DIV" && hasClass(inner, ROW_MENU_ACCESSORY_CLASS)) { mount = inner; break; }
+        }
+        return { rowButton, mount: mount !== null ? mount : child, legacy: false };
+      }
+      return null;
+    }
+
+    /**
+     * The one ⋯ button we own in this row, in either shape. Looking one level
+     * deeper (div.row, then div.accessory) is what keeps a row at exactly one ⋯
+     * while the host re-renders or the shape changes under us.
+     */
     function directMenuButton(row) {
       for (const child of row.children) {
-        if (child.getAttribute(ROW_MENU_ATTR) !== null) return child;
+        if (isMenuButton(child)) return child;
+        if (child.tagName !== "DIV") continue;
+        for (const inner of child.children) {
+          if (isMenuButton(inner)) return inner;
+          if (!hasClass(inner, ROW_MENU_ACCESSORY_CLASS)) continue;
+          for (const deep of inner.children) if (isMenuButton(deep)) return deep;
+        }
       }
       return null;
     }
 
+    /**
+     * Legacy shape only: the ⋯ floats, so the row must become its positioning
+     * parent and the host button must give it room. A style is recorded only at
+     * the moment it really changes, so restoreStyles() never writes back a value
+     * it did not set. The current shape calls neither — its accessory slot is
+     * already the host's own layout space.
+     */
     function ensureStyles(row, rowButton) {
-      if (!savedRowPositions.has(row)) savedRowPositions.set(row, row.style.position);
-      try {
-        if (window.getComputedStyle(row).position === "static") row.style.position = "relative";
-      } catch { row.style.position = "relative"; }
-      if (!savedButtonPadding.has(rowButton)) savedButtonPadding.set(rowButton, rowButton.style.paddingRight);
-      if (rowButton.style.paddingRight !== ROW_MENU_BUTTON_PADDING) rowButton.style.paddingRight = ROW_MENU_BUTTON_PADDING;
+      let position = "static";
+      try { position = window.getComputedStyle(row).position; } catch { position = "static"; }
+      if (position === "static") {
+        if (!savedRowPositions.has(row)) savedRowPositions.set(row, row.style.position);
+        if (row.style.position !== "relative") row.style.position = "relative";
+      }
+      if (rowButton.style.paddingRight !== ROW_MENU_BUTTON_PADDING) {
+        if (!savedButtonPadding.has(rowButton)) savedButtonPadding.set(rowButton, rowButton.style.paddingRight);
+        rowButton.style.paddingRight = ROW_MENU_BUTTON_PADDING;
+      }
     }
 
     function pruneDetachedStyles() {
@@ -7666,15 +7761,22 @@ window.__ModuleLoader__.load({
           for (const row of rows) {
             const path = row.getAttribute(ROW_MENU_PATH_ATTR);
             if (typeof path !== "string" || path === "") { missed++; continue; }
-            const rowButton = directRowButton(row);
-            if (rowButton === null) { missed++; continue; }
+            const parts = rowParts(row);
+            if (parts === null) { missed++; continue; }
             const isDirectory = row.getAttribute("data-files-entry") === "directory";
-            ensureStyles(row, rowButton);
             let button = directMenuButton(row);
-            if (button === null) {
-              button = createRowButton();
-              rowButton.insertAdjacentElement("afterend", button);
+            if (parts.legacy) {
+              // Legacy shape: float the ⋯ over the row, and restyle only then.
+              ensureStyles(row, parts.rowButton);
+              if (button === null) button = createRowButton();
+              if (button.parentNode !== parts.rowButton.parentNode) parts.rowButton.insertAdjacentElement("afterend", button);
+            } else {
+              // Current shape: the host already owns the right-hand slot, so nothing
+              // is restyled — the ⋯ is one more inline item inside that slot.
+              if (button === null) button = createRowButton();
+              if (button.parentNode !== parts.mount) parts.mount.appendChild(button);
             }
+            setInlineClass(button, !parts.legacy);
             const previousPath = button.getAttribute("data-lookout-path");
             if (previousPath !== path) {
               if (menuAnchor === button) closeMenu();
