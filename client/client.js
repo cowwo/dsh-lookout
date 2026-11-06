@@ -7293,6 +7293,11 @@ window.__ModuleLoader__.load({
   const ROW_MENU_BODY_SELECTOR = "[data-files-body]";
   const ROW_MENU_ROWS_SELECTOR = 'li[data-files-entry="file"],li[data-files-entry="directory"]';
   const ROW_MENU_PATH_ATTR = "data-files-path";
+  /** Same-origin download route: HEAD is our pre-flight, the browser streams the GET. */
+  const ROW_MENU_DOWNLOAD_ROUTE = "/api/lookout.download";
+  /** Where the current session id is read from, sidebar marker first, storage second. */
+  const ROW_MENU_SESSION_ATTR = "data-sidebar-right-session";
+  const ROW_MENU_SESSION_KEY = "dsh.sessions.current";
   /** A run that places nothing at all, this many times in a row, gives up. */
   const ROW_MENU_MAX_FAILURES = 3;
   const ROW_MENU_SCAN_DEBOUNCE = 200;
@@ -7322,12 +7327,13 @@ window.__ModuleLoader__.load({
     download: "下载",
     folderUnsupported: "文件夹暂不支持",
     copyFailed: "复制失败，请手动选择路径",
+    err400: "下载参数不完整：缺少会话或文件路径",
     err401: "登录已过期，请刷新页面重新登录",
-    err413: "文件太大，超出服务器允许的下载上限",
     err404: "文件不存在或已被删除",
-    err403: "没有权限读取这个文件",
+    err403: "只能下载当前会话工作区内的文件",
     errOther: "下载失败（HTTP {status}）",
     errNetwork: "下载失败，请检查连接",
+    errSession: "无法确定当前会话，已取消下载",
     givingUp: "文件行「⋯」菜单连续注入失败，已自动停止；文件树本身不受影响。",
     dismiss: "不再提示"
   };
@@ -7340,12 +7346,13 @@ window.__ModuleLoader__.load({
     download: "Download",
     folderUnsupported: "Folders not supported",
     copyFailed: "Copy failed — select the path and copy it manually",
+    err400: "The download request is incomplete: missing session or file path.",
     err401: "Your session has expired. Refresh the page and sign in again.",
-    err413: "This file is larger than the server's download limit.",
     err404: "The file no longer exists or was deleted.",
-    err403: "You do not have permission to read this file.",
+    err403: "You can only download files inside the current session's workspace.",
     errOther: "Download failed (HTTP {status}).",
     errNetwork: "Download failed — check your connection.",
+    errSession: "Cannot determine the current session — download cancelled.",
     givingUp: "The file-row ⋯ menu could not be injected repeatedly and stopped; the file tree itself is unaffected.",
     dismiss: "Do not show again"
   };
@@ -8133,18 +8140,49 @@ window.__ModuleLoader__.load({
 
     function downloadErrorText(status) {
       switch (status) {
+        case 400: return translate("err400");
         case 401: return translate("err401");
-        case 413: return translate("err413");
-        case 404: return translate("err404");
         case 403: return translate("err403");
+        case 404: return translate("err404");
         default: return translate("errOther", { status: status > 0 ? status : "?" });
       }
     }
 
+    /** The current session id: sidebar marker first, persisted pointer second, "" if neither. */
+    function currentSessionId() {
+      try {
+        const marker = document.querySelector("[" + ROW_MENU_SESSION_ATTR + "]");
+        const attr = marker !== null && marker !== undefined ? marker.getAttribute(ROW_MENU_SESSION_ATTR) : null;
+        if (typeof attr === "string" && attr !== "") return attr;
+      } catch (error) { /* fall through to storage */ }
+      try {
+        const stored = window.localStorage.getItem(ROW_MENU_SESSION_KEY);
+        if (typeof stored === "string" && stored !== "") return stored;
+      } catch (error) { /* no storage: no session */ }
+      return "";
+    }
+
+    function downloadUrl(sessionId, path) {
+      return ROW_MENU_DOWNLOAD_ROUTE
+        + "?sessionId=" + encodeURIComponent(sessionId)
+        + "&path=" + encodeURIComponent(path);
+    }
+
+    /**
+     * Download without ever holding the file: HEAD pre-flights the route, then a
+     * plain <a download> lets the browser stream its own GET to disk. A failed
+     * pre-flight never starts a download, it only explains why.
+     */
     async function downloadRowFile(path) {
+      const sessionId = currentSessionId();
+      if (sessionId === "") {
+        if (!disposed) showToast(translate("errSession"), false);
+        return;
+      }
+      const url = downloadUrl(sessionId, path);
       let response = null;
       try {
-        response = await window.fetch("api/file?path=" + encodeURIComponent(path), { credentials: "same-origin" });
+        response = await window.fetch(url, { method: "HEAD", credentials: "same-origin" });
       } catch (error) {
         if (!disposed) showToast(translate("errNetwork"), false);
         return;
@@ -8154,19 +8192,16 @@ window.__ModuleLoader__.load({
         if (!disposed) showToast(downloadErrorText(status), false);
         return;
       }
+      if (disposed) return;
       try {
-        const blob = await response.blob();
-        if (disposed) return;
-        const objectUrl = window.URL.createObjectURL(blob);
         const link = document.createElement("a");
-        link.href = objectUrl;
+        link.href = url;
         link.download = fileNameFor(path);
         link.rel = "noopener";
         link.style.display = "none";
         document.body.appendChild(link);
         link.click();
         link.remove();
-        window.setTimeout(() => { try { window.URL.revokeObjectURL(objectUrl); } catch { /* gone */ } }, 1000);
       } catch (error) {
         if (!disposed) showToast(translate("errNetwork"), false);
       }

@@ -33,11 +33,12 @@ const ZH = {
   folderUnsupported: '文件夹暂不支持',
   givingUp: '文件行「⋯」菜单连续注入失败，已自动停止；文件树本身不受影响。',
   dismiss: '不再提示',
+  err400: '下载参数不完整：缺少会话或文件路径',
   err401: '登录已过期，请刷新页面重新登录',
-  err403: '没有权限读取这个文件',
+  err403: '只能下载当前会话工作区内的文件',
   err404: '文件不存在或已被删除',
-  err413: '文件太大，超出服务器允许的下载上限',
   errNetwork: '下载失败，请检查连接',
+  errSession: '无法确定当前会话，已取消下载',
 };
 
 // ---------------------------------------------------------------- 假 DOM ----
@@ -547,7 +548,10 @@ test('注入：file/directory 行各有一个 ⋯，other 行没有；重复扫�
 });
 
 test('清理：dispose 后按钮全移除、inline style 还原、观察器断开、浮层与 toast 移除', async () => {
-  const env = createEnv({ fetch: async () => ({ ok: false, status: 500, blob: async () => ({}) }) });
+  const env = createEnv({
+    storage: { 'dsh.sessions.current': 'sess-abc' },
+    fetch: async () => ({ ok: false, status: 500 }),
+  });
   const { rows } = makeRows(env.document, FIVE_ROWS);
   const { dispose } = install(env);
   env.scheduler.tick(200);
@@ -651,11 +655,17 @@ test('复制：writeClipboard 收到 data-files-path 原文；✓ 反馈 1.5 秒
   dispose();
 });
 
-test('下载：请求 api/file?path=编码后绝对路径 且 same-origin；成功创建 a[download]，文件名取路径末段', async () => {
-  const env = createEnv();
+test('下载：先 HEAD 预检 /api/lookout.download?sessionId=…&path=…（same-origin），2xx 才建 a[download] 直下并点击', async () => {
+  const env = createEnv({ storage: { 'dsh.sessions.current': 'sess-abc' } });
   const { rows } = makeRows(env.document, FIVE_ROWS);
   const { dispose } = install(env);
   env.scheduler.tick(200);
+
+  let bodyReads = 0;
+  const readBody = async () => { bodyReads++; return {}; };
+  env.setFetch(async () => ({ ok: true, status: 200, blob: readBody, json: readBody, text: readBody }));
+  const clicks = [];
+  env.document.body.addEventListener('click', (event) => clicks.push(event.target));
 
   const path = rows[3].getAttribute('data-files-path');
   openMenu(rows[3]);
@@ -663,46 +673,95 @@ test('下载：请求 api/file?path=编码后绝对路径 且 same-origin；成�
   itemOf(popupOf(env.document), 1).click();
   await flush();
 
-  assert.equal(env.fetchCalls.length, 1, '只发一次请求');
-  assert.equal(env.fetchCalls[0].url, 'api/file?path=' + encodeURIComponent(path));
+  assert.equal(env.fetchCalls.length, 1, '只发一次请求（预检，不含浏览器自己的 GET）');
+  assert.equal(env.fetchCalls[0].init.method, 'HEAD', '预检必须是 HEAD');
+  assert.equal(env.fetchCalls[0].url, '/api/lookout.download?sessionId=sess-abc&path=' + encodeURIComponent(path),
+    'URL 形状：相对路径 + sessionId + encodeURIComponent 后的绝对路径');
   assert.equal(env.fetchCalls[0].init.credentials, 'same-origin');
 
-  const anchors = env.created.filter((node) => node.tagName === 'A' && node.download !== '');
+  const anchors = env.created.filter((node) => node.tagName === 'A');
   assert.equal(anchors.length, 1, '成功时必须创建下载链接');
   assert.equal(anchors[0].download, '报告 1.pdf', '文件名 = 路径最后一段（解码后）');
-  assert.equal(anchors[0].href, env.objectUrls[0].url);
+  assert.equal(anchors[0].href, env.fetchCalls[0].url, '链接直接指向下载地址，不经过 blob');
   assert.equal(anchors[0].parentNode, null, '点击后链接要移除');
+  const anchorClicks = clicks.filter((node) => node.tagName === 'A');
+  assert.equal(anchorClicks.length, 1, '必须触发一次 click');
+  assert.equal(anchorClicks[0] === anchors[0], true, '被点的就是那个 a[download]');
 
-  env.scheduler.tick(1000);
-  assert.deepEqual(env.revokedUrls, [env.objectUrls[0].url], '对象 URL 要回收');
+  assert.equal(bodyReads, 0, '绝不许 response.blob()/json()/text() 读内容');
+  assert.deepEqual(env.objectUrls, [], '绝不许 createObjectURL');
+  assert.deepEqual(env.revokedUrls, [], '没有对象 URL，也就没有回收');
   dispose();
 });
 
-test('下载错误映射：401/413/404/403/500/网络异常逐字对应源码文案', async () => {
-  const env = createEnv();
+test('下载错误映射：400/401/403/404/413/500/网络异常逐字对应源码文案，且预检失败绝不发起下载', async () => {
+  const env = createEnv({ storage: { 'dsh.sessions.current': 'sess-abc' } });
   const { rows } = makeRows(env.document, FIVE_ROWS);
   const { dispose } = install(env);
   env.scheduler.tick(200);
 
   const cases = [
+    { status: 400, text: ZH.err400 },
     { status: 401, text: ZH.err401 },
-    { status: 413, text: ZH.err413 },
     { status: 404, text: ZH.err404 },
     { status: 403, text: ZH.err403 },
+    { status: 413, text: '下载失败（HTTP 413）' },
     { status: 500, text: '下载失败（HTTP 500）' },
     { network: true, text: ZH.errNetwork },
   ];
   for (const item of cases) {
     env.setFetch(async () => {
       if (item.network === true) throw new Error('offline');
-      return { ok: false, status: item.status, blob: async () => ({}) };
+      return { ok: false, status: item.status };
     });
     openMenu(rows[2]);
     env.scheduler.tick(0);
     itemOf(popupOf(env.document), 1).click();
     await flush();
     assert.equal(toastText(env.document), item.text, '状态 ' + (item.network === true ? 'network' : item.status) + ' 的提示必须逐字一致');
+    assert.equal(env.created.filter((node) => node.tagName === 'A').length, 0, '预检非 2xx 时不许创建下载链接');
   }
+  assert.equal(env.fetchCalls.length, cases.length, '每个用例只发一次 HEAD');
+  assert.equal(env.fetchCalls.every((call) => call.init.method === 'HEAD'), true, '预检一律 HEAD');
+  assert.equal(env.fetchCalls.every((call) => call.init.credentials === 'same-origin'), true, '预检一律 same-origin');
+  assert.deepEqual(env.objectUrls, [], '错误路径也不许 createObjectURL');
+  dispose();
+});
+
+test('会话 id 来源：sidebar 属性优先，其次 localStorage；两者都没有则不请求、直接提示', async () => {
+  const env = createEnv({ storage: { 'dsh.sessions.current': 'from-storage' } });
+  const { rows } = makeRows(env.document, FIVE_ROWS);
+  const { dispose } = install(env);
+  env.scheduler.tick(200);
+
+  const marker = env.document.createElement('div');
+  marker.setAttribute('data-sidebar-right-session', 'from-sidebar');
+  env.document.body.appendChild(marker);
+
+  openMenu(rows[3]);
+  env.scheduler.tick(0);
+  itemOf(popupOf(env.document), 1).click();
+  await flush();
+  assert.equal(env.fetchCalls[0].url, '/api/lookout.download?sessionId=from-sidebar&path=' + encodeURIComponent(rows[3].getAttribute('data-files-path')),
+    '有 sidebar 标记时必须用它');
+
+  marker.remove();
+  openMenu(rows[3]);
+  env.scheduler.tick(0);
+  itemOf(popupOf(env.document), 1).click();
+  await flush();
+  assert.equal(env.fetchCalls[1].url, '/api/lookout.download?sessionId=from-storage&path=' + encodeURIComponent(rows[3].getAttribute('data-files-path')),
+    '没有标记时退回 localStorage');
+
+  env.storage.delete('dsh.sessions.current');
+  const anchorsBefore = env.created.filter((node) => node.tagName === 'A').length;
+  openMenu(rows[3]);
+  env.scheduler.tick(0);
+  itemOf(popupOf(env.document), 1).click();
+  await flush();
+  assert.equal(env.fetchCalls.length, 2, '取不到会话 id 时必须中止，不发请求');
+  assert.equal(toastText(env.document), ZH.errSession, '要提示无法确定当前会话');
+  assert.equal(env.created.filter((node) => node.tagName === 'A').length, anchorsBefore, '中止时不许新建下载链接');
   dispose();
 });
 
