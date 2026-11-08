@@ -7293,8 +7293,8 @@ window.__ModuleLoader__.load({
   const ROW_MENU_BODY_SELECTOR = "[data-files-body]";
   const ROW_MENU_ROWS_SELECTOR = 'li[data-files-entry="file"],li[data-files-entry="directory"]';
   const ROW_MENU_PATH_ATTR = "data-files-path";
-  /** Same-origin download route: HEAD is our pre-flight, the browser streams the GET. */
-  const ROW_MENU_DOWNLOAD_ROUTE = "/api/lookout.download";
+  /** Same-origin ticket route: a signed-in POST mints a one-shot download URL. */
+  const ROW_MENU_TICKET_ROUTE = "/api/lookout.ticket";
   /** Where the current session id is read from, sidebar marker first, storage second. */
   const ROW_MENU_SESSION_ATTR = "data-sidebar-right-session";
   const ROW_MENU_SESSION_KEY = "dsh.sessions.current";
@@ -7331,6 +7331,7 @@ window.__ModuleLoader__.load({
     err401: "登录已过期，请刷新页面重新登录",
     err404: "文件不存在或已被删除",
     err403: "只能下载当前会话工作区内的文件",
+    err410: "下载链接已失效或被用尽，请重新点击下载",
     errOther: "下载失败（HTTP {status}）",
     errNetwork: "下载失败，请检查连接",
     errSession: "无法确定当前会话，已取消下载",
@@ -7350,6 +7351,7 @@ window.__ModuleLoader__.load({
     err401: "Your session has expired. Refresh the page and sign in again.",
     err404: "The file no longer exists or was deleted.",
     err403: "You can only download files inside the current session's workspace.",
+    err410: "This download link has expired or was already used — click download again.",
     errOther: "Download failed (HTTP {status}).",
     errNetwork: "Download failed — check your connection.",
     errSession: "Cannot determine the current session — download cancelled.",
@@ -8144,6 +8146,7 @@ window.__ModuleLoader__.load({
         case 401: return translate("err401");
         case 403: return translate("err403");
         case 404: return translate("err404");
+        case 410: return translate("err410");
         default: return translate("errOther", { status: status > 0 ? status : "?" });
       }
     }
@@ -8162,16 +8165,56 @@ window.__ModuleLoader__.load({
       return "";
     }
 
-    function downloadUrl(sessionId, path) {
-      return ROW_MENU_DOWNLOAD_ROUTE
-        + "?sessionId=" + encodeURIComponent(sessionId)
-        + "&path=" + encodeURIComponent(path);
+    /**
+     * Ask the host for a one-shot download URL.
+     *
+     * The ticket route is the only place that knows the session workspace, so the
+     * browser never puts a file path into a URL it then hands to a download
+     * manager: the returned link already carries a single-use token.
+     * @param sessionId - current session id.
+     * @param path - absolute path of the row.
+     * @returns {Promise<{url: string, filename: string}|null>} the ticket, or null when refused.
+     */
+    async function requestDownloadTicket(sessionId, path) {
+      let response = null;
+      try {
+        response = await window.fetch(ROW_MENU_TICKET_ROUTE, {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ sessionId, path }),
+        });
+      } catch (error) {
+        if (!disposed) showToast(translate("errNetwork"), false);
+        return null;
+      }
+      if (response === null || response.ok !== true) {
+        const status = response !== null && typeof response.status === "number" ? response.status : 0;
+        if (!disposed) showToast(downloadErrorText(status), false);
+        return null;
+      }
+      let payload = null;
+      try {
+        payload = await response.json();
+      } catch (error) {
+        if (!disposed) showToast(translate("errOther", { status: "?" }), false);
+        return null;
+      }
+      const url = payload !== null && typeof payload === "object" ? payload.url : null;
+      if (typeof url !== "string" || url === "") {
+        if (!disposed) showToast(translate("errOther", { status: "?" }), false);
+        return null;
+      }
+      const name = payload !== null && typeof payload === "object" && typeof payload.filename === "string" && payload.filename !== ""
+        ? payload.filename
+        : fileNameFor(path);
+      return { url, filename: name };
     }
 
     /**
-     * Download without ever holding the file: HEAD pre-flights the route, then a
-     * plain <a download> lets the browser stream its own GET to disk. A failed
-     * pre-flight never starts a download, it only explains why.
+     * Download without ever holding the file: mint a one-shot ticket, then let a
+     * plain <a download> stream the host's own GET to disk. A refused ticket
+     * never starts a download, it only explains why.
      */
     async function downloadRowFile(path) {
       const sessionId = currentSessionId();
@@ -8179,24 +8222,12 @@ window.__ModuleLoader__.load({
         if (!disposed) showToast(translate("errSession"), false);
         return;
       }
-      const url = downloadUrl(sessionId, path);
-      let response = null;
-      try {
-        response = await window.fetch(url, { method: "HEAD", credentials: "same-origin" });
-      } catch (error) {
-        if (!disposed) showToast(translate("errNetwork"), false);
-        return;
-      }
-      if (response === null || response.ok !== true) {
-        const status = response !== null && typeof response.status === "number" ? response.status : 0;
-        if (!disposed) showToast(downloadErrorText(status), false);
-        return;
-      }
-      if (disposed) return;
+      const ticket = await requestDownloadTicket(sessionId, path);
+      if (ticket === null || disposed) return;
       try {
         const link = document.createElement("a");
-        link.href = url;
-        link.download = fileNameFor(path);
+        link.href = ticket.url;
+        link.download = ticket.filename;
         link.rel = "noopener";
         link.style.display = "none";
         document.body.appendChild(link);

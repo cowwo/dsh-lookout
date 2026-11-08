@@ -36,6 +36,7 @@ const ZH = {
   err400: '下载参数不完整：缺少会话或文件路径',
   err401: '登录已过期，请刷新页面重新登录',
   err403: '只能下载当前会话工作区内的文件',
+  err410: '下载链接已失效或被用尽，请重新点击下载',
   err404: '文件不存在或已被删除',
   errNetwork: '下载失败，请检查连接',
   errSession: '无法确定当前会话，已取消下载',
@@ -655,15 +656,21 @@ test('复制：writeClipboard 收到 data-files-path 原文；✓ 反馈 1.5 秒
   dispose();
 });
 
-test('下载：先 HEAD 预检 /api/lookout.download?sessionId=…&path=…（same-origin），2xx 才建 a[download] 直下并点击', async () => {
+test('下载：先 POST /api/lookout.ticket（same-origin）换一次性链接，再用 a[download] 直下并点击', async () => {
   const env = createEnv({ storage: { 'dsh.sessions.current': 'sess-abc' } });
   const { rows } = makeRows(env.document, FIVE_ROWS);
   const { dispose } = install(env);
   env.scheduler.tick(200);
 
-  let bodyReads = 0;
-  const readBody = async () => { bodyReads++; return {}; };
-  env.setFetch(async () => ({ ok: true, status: 200, blob: readBody, json: readBody, text: readBody }));
+  let blobReads = 0;
+  const ticket = { url: '/api/lookout.download?ticket=tok-1', filename: '报告 1.pdf', size: 1234, expiresAt: Date.now() + 300000 };
+  env.setFetch(async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ticket,
+    blob: async () => { blobReads++; return {}; },
+    text: async () => { blobReads++; return ''; },
+  }));
   const clicks = [];
   env.document.body.addEventListener('click', (event) => clicks.push(event.target));
 
@@ -673,22 +680,24 @@ test('下载：先 HEAD 预检 /api/lookout.download?sessionId=…&path=…（sa
   itemOf(popupOf(env.document), 1).click();
   await flush();
 
-  assert.equal(env.fetchCalls.length, 1, '只发一次请求（预检，不含浏览器自己的 GET）');
-  assert.equal(env.fetchCalls[0].init.method, 'HEAD', '预检必须是 HEAD');
-  assert.equal(env.fetchCalls[0].url, '/api/lookout.download?sessionId=sess-abc&path=' + encodeURIComponent(path),
-    'URL 形状：相对路径 + sessionId + encodeURIComponent 后的绝对路径');
+  assert.equal(env.fetchCalls.length, 1, '只发一次签票请求（文件本身交给浏览器）');
+  assert.equal(env.fetchCalls[0].init.method, 'POST', '签票必须是 POST');
+  assert.equal(env.fetchCalls[0].url, '/api/lookout.ticket', '签票地址');
   assert.equal(env.fetchCalls[0].init.credentials, 'same-origin');
+  const sent = JSON.parse(env.fetchCalls[0].init.body);
+  assert.equal(sent.sessionId, 'sess-abc', 'body 里带会话 id');
+  assert.equal(sent.path, path, 'body 里带绝对路径');
 
   const anchors = env.created.filter((node) => node.tagName === 'A');
   assert.equal(anchors.length, 1, '成功时必须创建下载链接');
-  assert.equal(anchors[0].download, '报告 1.pdf', '文件名 = 路径最后一段（解码后）');
-  assert.equal(anchors[0].href, env.fetchCalls[0].url, '链接直接指向下载地址，不经过 blob');
+  assert.equal(anchors[0].download, '报告 1.pdf', '文件名用服务端返回的 filename');
+  assert.equal(anchors[0].href, ticket.url, '链接直接指向一次性下载地址，不经过 blob');
   assert.equal(anchors[0].parentNode, null, '点击后链接要移除');
   const anchorClicks = clicks.filter((node) => node.tagName === 'A');
   assert.equal(anchorClicks.length, 1, '必须触发一次 click');
   assert.equal(anchorClicks[0] === anchors[0], true, '被点的就是那个 a[download]');
 
-  assert.equal(bodyReads, 0, '绝不许 response.blob()/json()/text() 读内容');
+  assert.equal(blobReads, 0, '绝不许把文件内容读进内存');
   assert.deepEqual(env.objectUrls, [], '绝不许 createObjectURL');
   assert.deepEqual(env.revokedUrls, [], '没有对象 URL，也就没有回收');
   dispose();
@@ -705,6 +714,7 @@ test('下载错误映射：400/401/403/404/413/500/网络异常逐字对应源�
     { status: 401, text: ZH.err401 },
     { status: 404, text: ZH.err404 },
     { status: 403, text: ZH.err403 },
+    { status: 410, text: ZH.err410 },
     { status: 413, text: '下载失败（HTTP 413）' },
     { status: 500, text: '下载失败（HTTP 500）' },
     { network: true, text: ZH.errNetwork },
@@ -721,8 +731,8 @@ test('下载错误映射：400/401/403/404/413/500/网络异常逐字对应源�
     assert.equal(toastText(env.document), item.text, '状态 ' + (item.network === true ? 'network' : item.status) + ' 的提示必须逐字一致');
     assert.equal(env.created.filter((node) => node.tagName === 'A').length, 0, '预检非 2xx 时不许创建下载链接');
   }
-  assert.equal(env.fetchCalls.length, cases.length, '每个用例只发一次 HEAD');
-  assert.equal(env.fetchCalls.every((call) => call.init.method === 'HEAD'), true, '预检一律 HEAD');
+  assert.equal(env.fetchCalls.length, cases.length, '每个用例只发一次签票请求');
+  assert.equal(env.fetchCalls.every((call) => call.init.method === 'POST'), true, '签票一律 POST');
   assert.equal(env.fetchCalls.every((call) => call.init.credentials === 'same-origin'), true, '预检一律 same-origin');
   assert.deepEqual(env.objectUrls, [], '错误路径也不许 createObjectURL');
   dispose();
@@ -742,16 +752,15 @@ test('会话 id 来源：sidebar 属性优先，其次 localStorage；两者都�
   env.scheduler.tick(0);
   itemOf(popupOf(env.document), 1).click();
   await flush();
-  assert.equal(env.fetchCalls[0].url, '/api/lookout.download?sessionId=from-sidebar&path=' + encodeURIComponent(rows[3].getAttribute('data-files-path')),
-    '有 sidebar 标记时必须用它');
+  assert.equal(env.fetchCalls[0].url, '/api/lookout.ticket', '签票地址固定');
+  assert.equal(JSON.parse(env.fetchCalls[0].init.body).sessionId, 'from-sidebar', '有 sidebar 标记时必须用它');
 
   marker.remove();
   openMenu(rows[3]);
   env.scheduler.tick(0);
   itemOf(popupOf(env.document), 1).click();
   await flush();
-  assert.equal(env.fetchCalls[1].url, '/api/lookout.download?sessionId=from-storage&path=' + encodeURIComponent(rows[3].getAttribute('data-files-path')),
-    '没有标记时退回 localStorage');
+  assert.equal(JSON.parse(env.fetchCalls[1].init.body).sessionId, 'from-storage', '没有标记时退回 localStorage');
 
   env.storage.delete('dsh.sessions.current');
   const anchorsBefore = env.created.filter((node) => node.tagName === 'A').length;
