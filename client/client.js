@@ -7283,6 +7283,10 @@ window.__ModuleLoader__.load({
   const ROW_MENU_NS = "dsh-lookout";
   /** Sibling button injected after the row button; its presence is the idempotency key. */
   const ROW_MENU_ATTR = "data-lookout-rowmenu";
+  /** The byte-size label that sits to the left of ⋯. */
+  const ROW_MENU_SIZE_ATTR = "data-lookout-size";
+  /** How long a directory listing's sizes stay usable before asking again. */
+  const ROW_MENU_SIZE_TTL_MS = 1500;
   /** Modifier for the current host shape: inline inside the host's accessory slot. */
   const ROW_MENU_INLINE_CLASS = "dsh-lookout-rowmenu--inline";
   /** The host's right-hand slot inside li > div.row (sidebar-files 0.2.2). */
@@ -7368,6 +7372,8 @@ window.__ModuleLoader__.load({
     ".dsh-lookout-rowmenu--inline{position:static;top:auto;right:auto;flex:none;}",
     ".dsh-lookout-rowmenu:hover,.dsh-lookout-rowmenu:focus-visible{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover);outline:none;}",
     ".dsh-lookout-rowmenu svg{display:block;width:16px;height:16px;pointer-events:none;}",
+    ".dsh-lookout-size{flex:none;margin-right:2px;color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:1;font-variant-numeric:tabular-nums;white-space:nowrap;pointer-events:none;}",
+    ".dsh-lookout-size--floating{position:absolute;top:8px;right:36px;}",
     ".dsh-lookout-rowmenu[data-lookout-copied]{color:var(--dsw-alias-state-success-primary);}",
     ".dsh-lookout-rowmenu-pop{position:fixed;z-index:2147482000;min-width:176px;padding:4px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-overlay);color:var(--dsw-alias-label-primary);font-size:13px;line-height:1.4;box-shadow:0 8px 24px var(--dsw-alias-bg-mask-drop);}",
     ".dsh-lookout-rowmenu-item{display:flex;align-items:center;justify-content:space-between;gap:10px;width:100%;padding:7px 10px;border:0;border-radius:6px;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer;touch-action:manipulation;-webkit-tap-highlight-color:transparent;}",
@@ -7466,8 +7472,49 @@ window.__ModuleLoader__.load({
     let toast = null;
     let toastTimer = 0;
     const feedbackTimers = new Map();
+    /** workspaceFiles remote, once the host hands it over; null until then. */
+    let sizeRemote = null;
+    /** dir → { at, sizes: Map<name, number> }; refreshed on expand/refresh. */
+    const sizeCache = new Map();
+    let sizePass = 0;
+    let sizeWarned = false;
+    /** One console line only: enough to diagnose, never noisy. */
+    function noteSizeProblem(message) {
+      if (sizeWarned) return;
+      sizeWarned = true;
+      try { console.warn("[dsh-lookout] 大小标签不可用: " + message); } catch { /* no console */ }
+    }
     const savedRowPositions = new Map();
     const savedButtonPadding = new Map();
+
+    // The host exposes directory listings (which carry `size`) on the client remote.
+    // Absent in a headless context — sizes then simply never appear.
+    try {
+      if (ctx !== null && ctx !== undefined && typeof ctx.inject === "function") {
+        ctx.inject(["remote", "remote.workspaceFiles"], (scoped) => {
+          let namespace;
+          try {
+            namespace = scoped !== null && scoped !== undefined && scoped.remote !== undefined
+              ? scoped.remote.workspaceFiles
+              : (typeof scoped?.get === "function" ? scoped.get("remote")?.workspaceFiles : undefined);
+          } catch { namespace = undefined; }
+          if (namespace === undefined || namespace === null || typeof namespace.list !== "function") { noteSizeProblem("remote.workspaceFiles 缺失"); return; }
+          sizeRemote = namespace;
+          scheduleScan();
+        });
+      }
+    } catch (error) { noteSizeProblem("注入失败: " + (error?.message ?? error)); }
+
+    // If the remote never arrives within 2s, say so once — silence is what made
+    // the first report impossible to diagnose.
+    if (ctx !== null && ctx !== undefined && typeof ctx.inject === "function") {
+      try {
+        window.setTimeout(() => {
+          if (disposed) return;
+          if (sizeRemote === null) noteSizeProblem("remote 注入回调没有触发");
+        }, 2000);
+      } catch { /* timer unavailable */ }
+    }
 
     // ---- locale ---------------------------------------------------------
     try {
@@ -7754,6 +7801,141 @@ window.__ModuleLoader__.load({
       return button;
     }
 
+    // ---- size label -----------------------------------------------------
+    /** 1024-based, one decimal: 820 B / 1.2 KB / 3.4 MB. */
+    function formatSize(bytes) {
+      if (typeof bytes !== "number" || !Number.isFinite(bytes) || bytes < 0) return "";
+      if (bytes < 1024) return Math.round(bytes) + " B";
+      const units = ["KB", "MB", "GB", "TB"];
+      let value = bytes / 1024;
+      let unit = 0;
+      while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit += 1; }
+      return value.toFixed(1) + " " + units[unit];
+    }
+
+    /** Directory part of an absolute path, without a trailing slash. */
+    function parentDirOf(path) {
+      if (typeof path !== "string") return "";
+      const trimmed = path.replace(/[/\\]+$/, "");
+      const at = Math.max(trimmed.lastIndexOf("/"), trimmed.lastIndexOf("\\"));
+      if (at <= 0) return at === 0 ? "/" : "";
+      return trimmed.slice(0, at);
+    }
+
+    /** The size span for one row, created on demand and kept to exactly one. */
+    function ensureSizeLabel(row, parts) {
+      let label = null;
+      for (const child of row.children) {
+        if (child.getAttribute !== undefined && child.getAttribute(ROW_MENU_SIZE_ATTR) !== null) { label = child; break; }
+      }
+      if (label === null && parts.mount !== null && parts.mount !== undefined) {
+        for (const child of parts.mount.children) {
+          if (child.getAttribute !== undefined && child.getAttribute(ROW_MENU_SIZE_ATTR) !== null) { label = child; break; }
+        }
+      }
+      if (label === null) {
+        label = document.createElement("span");
+        label.setAttribute(ROW_MENU_SIZE_ATTR, "");
+      }
+      label.className = parts.legacy ? "dsh-lookout-size dsh-lookout-size--floating" : "dsh-lookout-size";
+      return label;
+    }
+
+    /** Paint every visible file row from the current cache (dirs never get a size). */
+    function applySizeLabels() {
+      let rows = [];
+      try { rows = document.querySelectorAll(ROW_MENU_ROWS_SELECTOR); } catch { return; }
+      for (const row of rows) {
+        if (row.getAttribute("data-files-entry") !== "file") continue;
+        const path = row.getAttribute(ROW_MENU_PATH_ATTR);
+        if (typeof path !== "string" || path === "") continue;
+        const parts = rowParts(row);
+        if (parts === null) continue;
+        const dir = parentDirOf(path);
+        const name = path.slice(path.lastIndexOf("/") + 1);
+        const cached = sizeCache.get(dir);
+        const size = cached !== undefined ? cached.sizes.get(name) : undefined;
+        const text = formatSize(size);
+        let label = null;
+        for (const child of row.children) {
+          if (child.getAttribute !== undefined && child.getAttribute(ROW_MENU_SIZE_ATTR) !== null) { label = child; break; }
+        }
+        if (parts.mount !== null && label === null) {
+          for (const child of parts.mount.children) {
+            if (child.getAttribute !== undefined && child.getAttribute(ROW_MENU_SIZE_ATTR) !== null) { label = child; break; }
+          }
+        }
+        if (text === "") {
+          if (label !== null) { try { label.remove(); } catch { /* gone */ } }
+          continue;
+        }
+        label = ensureSizeLabel(row, parts);
+        if (label.textContent !== text) label.textContent = text;
+        // Legacy floats on the li; the current shape lives inside the host's accessory,
+        // immediately before ⋯ so it reads "README.md   1.2 MB  ⋯".
+        const holder = parts.legacy ? row : (parts.mount !== null && parts.mount !== undefined ? parts.mount : row);
+        if (label.parentNode !== holder) holder.appendChild(label);
+        if (!parts.legacy) {
+          // Keep ⋯ last without insertBefore: only reorder when it drifted left of the
+          // label, so a steady tree never gets rewritten on every scan.
+          const marker = directMenuButton(row);
+          if (marker !== null && marker.parentNode === holder) {
+            const order = Array.prototype.slice.call(holder.children);
+            if (order.indexOf(marker) < order.indexOf(label)) holder.appendChild(marker);
+          }
+        }
+      }
+    }
+
+    /**
+     * Ask the host once per directory for its listing (the entries carry `size`).
+     * A stale answer is dropped: only the newest pass may paint.
+     */
+    async function refreshSizes() {
+      if (disposed || !enabled || givenUp || sizeRemote === null) return;
+      const sessionId = currentSessionId();
+      if (sessionId === "") { noteSizeProblem("取不到会话 id"); return; }
+      const dirs = new Map();
+      let rows = [];
+      try { rows = document.querySelectorAll(ROW_MENU_ROWS_SELECTOR); } catch { return; }
+      for (const row of rows) {
+        if (row.getAttribute("data-files-entry") !== "file") continue;
+        const path = row.getAttribute(ROW_MENU_PATH_ATTR);
+        if (typeof path !== "string" || path === "") continue;
+        const dir = parentDirOf(path);
+        if (dir !== "") dirs.set(dir, true);
+      }
+      if (dirs.size === 0) { applySizeLabels(); return; }
+      const pass = ++sizePass;
+      for (const dir of dirs.keys()) {
+        const cached = sizeCache.get(dir);
+        if (cached !== undefined && Date.now() - cached.at < ROW_MENU_SIZE_TTL_MS) continue;
+        try {
+          const result = await sizeRemote.list(sessionId, dir);
+          if (disposed || pass !== sizePass) return;
+          if (result !== null && result !== undefined && result.ok === false) throw new Error("listing refused");
+          const payload = result !== null && result !== undefined && Array.isArray(result.entries)
+            ? result
+            : (result !== null && result !== undefined && result.value !== undefined ? result.value : null);
+          const entries = payload !== null && Array.isArray(payload.entries) ? payload.entries : [];
+          const sizes = new Map();
+          for (const entry of entries) {
+            if (entry === null || entry === undefined) continue;
+            if (typeof entry.name !== "string") continue;
+            if (typeof entry.size === "number") sizes.set(entry.name, entry.size);
+          }
+          sizeCache.set(dir, { at: Date.now(), sizes });
+        } catch (error) {
+          // A failed listing just means "no size for this directory" — never break the tree.
+          noteSizeProblem("list 调用失败: " + (error?.message ?? error));
+          if (disposed || pass !== sizePass) return;
+          sizeCache.set(dir, { at: Date.now(), sizes: new Map() });
+        }
+      }
+      if (disposed || !enabled || pass !== sizePass) return;
+      applySizeLabels();
+    }
+
     // ---- scan / injection ----------------------------------------------
     function scan() {
       if (disposed || !enabled || givenUp) return;
@@ -7810,6 +7992,8 @@ window.__ModuleLoader__.load({
       if (placed > 0) failures = 0;
       else if (failure !== null) noteFailure(failure);
       else if (missed > 0) noteFailure("no eligible row could take the menu button");
+      // Sizes are a luxury: a failed listing only hides the label.
+      void refreshSizes();
     }
 
     function noteFailure(why) {
@@ -7906,6 +8090,7 @@ window.__ModuleLoader__.load({
 
     function removeInjected() {
       try { document.querySelectorAll("[" + ROW_MENU_ATTR + "]").forEach((node) => node.remove()); } catch { /* gone */ }
+      try { document.querySelectorAll("[" + ROW_MENU_SIZE_ATTR + "]").forEach((node) => node.remove()); } catch { /* gone */ }
       restoreStyles();
       for (const timer of feedbackTimers.values()) { try { window.clearTimeout(timer); } catch { /* gone */ } }
       feedbackTimers.clear();

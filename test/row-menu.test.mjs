@@ -390,9 +390,17 @@ function regionApi(env) {
 function install(env, options = {}) {
   const api = regionApi(env);
   const effects = [];
-  const ctx = options.ctx ?? {
-    effect(fn, label) { effects.push({ fn, label }); },
-  };
+  // 传入自定义 ctx 时，把它的 effect 包一层：install 仍能拿到本功能的 disposer。
+  const ctx = options.ctx === undefined
+    ? { effect(fn, label) { effects.push({ fn, label }); } }
+    : {
+        ...options.ctx,
+        effect(fn, label) {
+          effects.push({ fn, label });
+          if (typeof options.ctx.effect === 'function') return options.ctx.effect(fn, label);
+          return undefined;
+        },
+      };
   const requireFn = options.require ?? ((id) => {
     if (id === 'react') return { createElement() {}, useState() {} };
     if (id === PRIMITIVES) return {};
@@ -1114,4 +1122,132 @@ test('CSS：行内修饰类覆盖绝对定位，尺寸与配色继续继承 .dsh
   const styleTag = env.document.querySelector('style[data-plugin-css="lookout-row-menu"]');
   assert.equal(styleTag.textContent, css, '样式标签必须带上这条规则');
   dispose();
+});
+
+// ---------------------------------------------------------------- 大小标签 ----
+
+/** 带 remote.workspaceFiles 的 ctx：只有注入成功后才会有大小。 */
+function sizeCtx(listImpl) {
+  const effects = [];
+  const calls = [];
+  const remote = {
+    async list(sessionId, dir) {
+      calls.push({ sessionId, dir });
+      return listImpl(dir);
+    },
+  };
+  return {
+    calls,
+    ctx: {
+      effect(fn, label) { effects.push({ fn, label }); },
+      inject(services, callback) {
+        assert.deepEqual(services, ['remote', 'remote.workspaceFiles']);
+        callback({ remote: { workspaceFiles: remote } });
+      },
+    },
+  };
+}
+
+test('大小：新结构下显示在 ⋯ 左边（accessory 内），目录行不显示', async () => {
+  const env = createEnv({ storage: { 'dsh.sessions.current': 'sess-x' } });
+  const { rows } = makeTree(env.document, 'current');
+  const helper = sizeCtx(() => ({
+    entries: [
+      { name: 'src', type: 'directory' },
+      { name: 'README.md', type: 'file', size: 1258291 },
+    ],
+    truncated: false,
+  }));
+  const { dispose } = install(env, { ctx: helper.ctx });
+  env.scheduler.tick(200);
+  await flush();
+
+  const fileRow = rows[1];
+  const accessory = fileRow.querySelector('div.accessory');
+  const label = accessory.querySelector('[data-lookout-size]');
+  assert.ok(label, '文件行必须有大小标签');
+  assert.equal(label.textContent, '1.2 MB', '1258291 字节 → 1.2 MB');
+  const anchor2 = menuButton(fileRow);
+  const children = Array.from(accessory.children);
+  assert.ok(children.indexOf(label) < children.indexOf(anchor2), '大小必须排在 ⋯ 左边');
+  assert.equal(rows[0].querySelector('[data-lookout-size]'), null, '目录行不显示大小');
+  assert.equal(rows[2].querySelector('[data-lookout-size]'), null, 'other 行不显示大小');
+  assert.equal(helper.calls.length, 1, '同一目录只请求一次');
+  assert.equal(helper.calls[0].dir, '/root/work');
+  assert.equal(helper.calls[0].sessionId, 'sess-x');
+  dispose();
+});
+
+test('大小：老结构下用浮动样式挂在行里，仍然在 ⋯ 左边', async () => {
+  const env = createEnv({ storage: { 'dsh.sessions.current': 'sess-x' } });
+  const { rows } = makeTree(env.document, 'legacy');
+  const helper = sizeCtx(() => ({ entries: [{ name: 'README.md', type: 'file', size: 820 }], truncated: false }));
+  const { dispose } = install(env, { ctx: helper.ctx });
+  env.scheduler.tick(200);
+  await flush();
+
+  const label = rows[1].querySelector('[data-lookout-size]');
+  assert.ok(label, '老结构也要显示');
+  assert.equal(label.textContent, '820 B');
+  assert.equal(label.matches('.dsh-lookout-size--floating'), true, '老结构必须浮动定位');
+  assert.equal(label.parentNode, rows[1], '浮动标签挂在 li 上');
+  dispose();
+});
+
+test('大小：单位换算（B/KB/MB/GB）与一位小数', async () => {
+  const env = createEnv({ storage: { 'dsh.sessions.current': 'sess-x' } });
+  const specs = [
+    { entry: 'file', path: '/root/work/a.bin', label: 'a.bin' },
+    { entry: 'file', path: '/root/work/b.bin', label: 'b.bin' },
+    { entry: 'file', path: '/root/work/c.bin', label: 'c.bin' },
+    { entry: 'file', path: '/root/work/d.bin', label: 'd.bin' },
+  ];
+  const { rows } = makeTree(env.document, 'current', specs);
+  const helper = sizeCtx(() => ({
+    entries: [
+      { name: 'a.bin', type: 'file', size: 999 },
+      { name: 'b.bin', type: 'file', size: 1536 },
+      { name: 'c.bin', type: 'file', size: 5 * 1024 * 1024 },
+      { name: 'd.bin', type: 'file', size: 3 * 1024 * 1024 * 1024 },
+    ],
+    truncated: false,
+  }));
+  const { dispose } = install(env, { ctx: helper.ctx });
+  env.scheduler.tick(200);
+  await flush();
+  const texts = rows.map((row) => {
+    const label = row.querySelector('[data-lookout-size]');
+    return label === null ? null : label.textContent;
+  });
+  assert.deepEqual(texts, ['999 B', '1.5 KB', '5.0 MB', '3.0 GB']);
+  dispose();
+});
+
+test('大小：列表失败时静默隐藏，不影响 ⋯ 与文件树', async () => {
+  const env = createEnv({ storage: { 'dsh.sessions.current': 'sess-x' } });
+  const { rows } = makeTree(env.document, 'current');
+  const helper = sizeCtx(() => { throw new Error('listing failed'); });
+  const { dispose } = install(env, { ctx: helper.ctx });
+  env.scheduler.tick(200);
+  await flush();
+  assert.equal(env.document.querySelectorAll('[data-lookout-size]').length, 0);
+  assert.equal(rows[1].querySelectorAll('[data-lookout-rowmenu]').length, 1, '⋯ 不受影响');
+  dispose();
+});
+
+test('大小：同一目录在缓存期内只请求一次；dispose 后标签全消失', async () => {
+  const env = createEnv({ storage: { 'dsh.sessions.current': 'sess-x' } });
+  makeTree(env.document, 'current');
+  const helper = sizeCtx(() => ({ entries: [{ name: 'README.md', type: 'file', size: 2048 }], truncated: false }));
+  const { dispose } = install(env, { ctx: helper.ctx });
+  env.scheduler.tick(200);
+  await flush();
+  assert.equal(helper.calls.length, 1);
+  env.observers.forEach((observer) => observer.trigger());
+  env.scheduler.tick(300);
+  await flush();
+  assert.equal(helper.calls.length, 1, '缓存期内不重复请求');
+  assert.equal(env.document.querySelector('[data-lookout-size]').textContent, '2.0 KB');
+  dispose();
+  assert.equal(env.document.querySelectorAll('[data-lookout-size]').length, 0, 'dispose 必须清掉大小标签');
 });
